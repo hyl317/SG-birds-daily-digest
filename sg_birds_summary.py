@@ -299,6 +299,7 @@ Known acronyms (use these to expand abbreviations in the messages):
             "content": f"""Analyze these bird sighting messages from the "SG Birds" Telegram group (Singapore).
 {acronyms_section}
 IMPORTANT: Only report bird species that are explicitly named or abbreviated in the text messages. Do NOT infer or guess species from photos, descriptions, or behavioral clues. If a message contains only a photo with no text identifying the bird, skip it. If an acronym is ambiguous and not in the known acronyms list, note it as "unidentified (acronym: XX)" rather than guessing.
+Only include species with confirmed sighting details (location, time, or observer). Skip species that are merely mentioned in questions, queries, or general discussion without an actual sighting being reported.
 
 For each bird species mentioned, extract:
 - Species name (common name, and scientific name if you can identify it)
