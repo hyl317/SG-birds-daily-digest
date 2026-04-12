@@ -86,3 +86,14 @@ All acronyms used in these messages are already in the known acronyms list:
 - BAMK = Bishan-Ang Mo Kio Park
 - SBNR = Singapore Bukit Nature Reserve (unconfirmed)
 - BEKF = Black Eagle-Kingfisher (unconfirmed)
+
+<!-- Auto-detected 12 Apr 2026 -->
+- TEG = Tampines Eco Green
+- ORP = Orchard Road/Area (unconfirmed)
+- FWD = Forward/Location (unconfirmed)
+- vsb = Von Shrenk's Bittern (unconfirmed)
+- POI = Point of Interest
+- juvie = juvenile
+- BAMK = Bishan-Ang Mo Kio Park
+- BHO = Brown Hawk Owl
+- SBG = Singapore Botanic Gardens (already known, but confirmed in context)

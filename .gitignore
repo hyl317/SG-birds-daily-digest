@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 config.json
 *.plist
+sightings.db
+sightings.db-*
+sg_birds_bot.session*
+.claude/

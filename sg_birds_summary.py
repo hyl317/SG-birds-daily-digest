@@ -10,6 +10,7 @@ After that, schedule via cron (see bottom of file for example).
 import json
 import os
 import plistlib
+import re
 import subprocess
 import sys
 import asyncio
@@ -20,6 +21,8 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.types import Chat, Channel
 import anthropic
+
+import db
 
 load_dotenv()
 
@@ -260,8 +263,11 @@ async def fetch_messages(client, group_id, start_utc, end_utc):
             if q:
                 reply_context = f" (replying to {q['sender']}: \"{q['text']}\")"
 
+        sg_dt = msg.date.astimezone(SG_TZ)
         messages.append({
-            "date": msg.date.astimezone(SG_TZ).strftime("%H:%M"),
+            "msg_id": msg.id,
+            "date": sg_dt.strftime("%Y-%m-%d"),
+            "time": sg_dt.strftime("%H:%M"),
             "sender": sender,
             "reply_context": reply_context,
             "text": text,
@@ -279,9 +285,31 @@ def load_acronyms():
         return f.read()
 
 
-def summarize_with_claude(messages_text):
-    """Use Claude to extract bird species and locations from the messages."""
+def format_messages_for_claude(messages):
+    """Format the message list for Claude with msg IDs and full dates inline."""
+    return "\n".join(
+        f"[msg_id={m['msg_id']}] [{m['date']} {m['time']}] {m['sender']}{m['reply_context']}: {m['text']}"
+        for m in messages
+    )
+
+
+def summarize_with_claude(messages):
+    """
+    Use Claude to extract bird species and locations from the messages.
+
+    `messages` is a list of dicts (from fetch_messages).
+    Returns a tuple (html_summary, sightings_list).
+
+    sightings_list is a list of dicts with keys:
+        date, time, species, location, observer, notes, source_msg_id
+    or None if structured parsing failed (the html_summary is still returned).
+    """
     client = anthropic.Anthropic()
+
+    messages_text = format_messages_for_claude(messages)
+    if len(messages_text) > MAX_MESSAGE_CHARS:
+        messages_text = messages_text[:MAX_MESSAGE_CHARS]
+        print(f"Warning: truncated to {MAX_MESSAGE_CHARS} chars")
 
     acronyms_text = load_acronyms()
     acronyms_section = ""
@@ -301,17 +329,30 @@ Known acronyms (use these to expand abbreviations in the messages):
 IMPORTANT: Only report bird species that are explicitly named or abbreviated in the text messages. Do NOT infer or guess species from photos, descriptions, or behavioral clues. If a message contains only a photo with no text identifying the bird, skip it. If an acronym is ambiguous and not in the known acronyms list, note it as "unidentified (acronym: XX)" rather than guessing.
 Only include species with confirmed sighting details (location, time, or observer). Skip species that are merely mentioned in questions, queries, or general discussion without an actual sighting being reported.
 
-For each bird species mentioned, extract:
-- Species name (common name, and scientific name if you can identify it)
-- Location(s) where it was spotted
-- Time of sighting if mentioned
-- Any notable behavior or details (e.g. number seen, nesting, rare visitor)
+CRITICAL — species accuracy: The "species" field for each sighting MUST be the exact bird that was actually observed in that specific message. Do NOT carry over a species name from earlier messages, the surrounding conversation context, or the chat's general topic. If a message describes seeing "Hooded Pitta and Blue-winged Pitta", create one sighting record per species — do NOT label it as "Fairy Pitta" just because Fairy Pitta is a popular topic in the group. If you cannot determine the species from the message itself, skip the sighting entirely rather than guessing.
 
-Group the results by species, sorted alphabetically.
-At the top, include a quick stats line: total species count, total sightings, and any highlights (rare species, unusual behavior).
-If a location appears frequently, note how many sightings occurred there.
+Each message is prefixed with [msg_id=N] [YYYY-MM-DD HH:MM] sender: text. Use the msg_id to reference which message each sighting came from.
 
-Formatting rules (the output will be sent as a Telegram message using HTML parse mode):
+Return your response in TWO parts:
+
+PART 1 — A JSON code block (fenced with ```json ... ```) containing an array of structured sighting objects. One object per (species, location) sighting. Schema:
+[
+  {{
+    "date": "YYYY-MM-DD",            // sighting date in Singapore time
+    "species": "Common Name",         // expand acronyms
+    "location": "Full Location Name" or null,
+    "observer": "Sender Name" or null,
+    "notes": "any details (count, behavior, etc.)" or null,
+    "source_msg_id": 12345            // the msg_id from the source message
+  }}
+]
+Use the same skip rules: only include confirmed sightings with at least a location or observer.
+
+PART 2 — After the JSON block, the human-readable summary, formatted for Telegram HTML:
+- For each bird species mentioned, list location(s), time, and notable details
+- Group by species, sorted alphabetically
+- At the top, a quick stats line: total species count, total sightings, highlights
+- If a location appears frequently, note how many sightings occurred there
 - Wrap each bird's common name in <b>bold</b> tags (e.g. <b>Oriental Pied Hornbill</b>)
 - Do NOT bold any other text (scientific names, locations, times, details, headings, stats)
 - Use plain text for everything else
@@ -321,7 +362,31 @@ Messages:
         }],
     )
 
-    return next(b.text for b in response.content if b.type == "text")
+    raw = next(b.text for b in response.content if b.type == "text")
+    return parse_claude_response(raw)
+
+
+def parse_claude_response(raw):
+    """Extract the JSON sighting list and the HTML summary from Claude's response."""
+    match = re.search(r"```json\s*(.*?)\s*```", raw, re.DOTALL)
+    sightings = None
+    html = raw
+    if match:
+        json_text = match.group(1)
+        try:
+            sightings = json.loads(json_text)
+            if not isinstance(sightings, list):
+                sightings = None
+            else:
+                # Strip the JSON block from the HTML so it doesn't get sent to Telegram
+                html = (raw[:match.start()] + raw[match.end():]).strip()
+        except json.JSONDecodeError as e:
+            print(f"Warning: failed to parse sightings JSON: {e}")
+            sightings = None
+    else:
+        print("Warning: no JSON sightings block found in Claude response")
+
+    return html, sightings
 
 
 def extract_acronyms(messages_text):
@@ -388,6 +453,11 @@ async def main():
         if config is None:
             config = await run_setup(tg_client)
 
+        # Prune sightings older than the retention window before adding today's
+        pruned = db.prune_older_than(90)
+        if pruned:
+            print(f"Pruned {pruned} sightings older than 90 days")
+
         # Compute time window based on configured schedule
         now = datetime.now(SG_TZ)
         freq_hours = config["frequency_hours"]
@@ -409,18 +479,19 @@ async def main():
             print("No messages in this window — skipping.")
             return
 
-        # Format messages for Claude
-        messages_text = "\n".join(
-            f"[{m['date']}] {m['sender']}{m['reply_context']}: {m['text']}" for m in messages
-        )
+        summary, sightings = summarize_with_claude(messages)
 
-        # Truncate if too large
-        if len(messages_text) > MAX_MESSAGE_CHARS:
-            messages_text = messages_text[:MAX_MESSAGE_CHARS]
-            print(f"Warning: truncated to {MAX_MESSAGE_CHARS} chars")
+        if sightings:
+            inserted = db.insert_sightings(sightings)
+            print(f"Persisted {inserted} new sightings to DB (total: {db.count()})")
+        else:
+            print("No structured sightings parsed — skipping DB write")
 
-        summary = summarize_with_claude(messages_text)
-        extract_acronyms(messages_text)
+        # Acronym extraction still uses the simple text format
+        acronyms_text = format_messages_for_claude(messages)
+        if len(acronyms_text) > MAX_MESSAGE_CHARS:
+            acronyms_text = acronyms_text[:MAX_MESSAGE_CHARS]
+        extract_acronyms(acronyms_text)
 
         window_str = (
             f"{start_time.strftime('%-d %B %H:%M')} – {end_time.strftime('%-d %B %H:%M')}"
