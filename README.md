@@ -1,6 +1,6 @@
 # SG Birds Daily Digest
 
-A small Python project that turns the [SG Birds (Sightings/Live Update)](https://t.me/) Telegram group into:
+A small Python project that turns a Singapore birding Telegram group into:
 
 1. **A daily digest** — Claude Haiku reads the day's messages and produces a clean, grouped summary of bird species, locations, and notable details, delivered to your Telegram Saved Messages (or any chat).
 2. **A searchable 90-day archive** — every sighting is extracted into a local SQLite database with full-text search.
