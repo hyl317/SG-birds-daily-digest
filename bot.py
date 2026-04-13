@@ -17,9 +17,11 @@ Setup:
 """
 
 import asyncio
+import html
 import json
 import os
 import re
+import urllib.parse
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -76,6 +78,15 @@ def load_acronym_map():
 ACRONYM_MAP = load_acronym_map()
 
 
+def maps_link(location):
+    """Google Maps search URL for a free-text location. 'Singapore' is prepended
+    so ambiguous names resolve to the local match."""
+    if not location:
+        return None
+    query = urllib.parse.quote_plus(f"{location}, Singapore")
+    return f"https://www.google.com/maps/search/?api=1&query={query}"
+
+
 def deep_link(source_msg_id):
     """Build a t.me deep link to a message in the source group, if possible."""
     if not GROUP_ID or not source_msg_id:
@@ -91,10 +102,11 @@ def deep_link(source_msg_id):
 
 def format_full_message(row):
     """The message body that gets posted to chat if the user clicks a result."""
-    parts = [f"<b>{row['species']}</b>"]
+    parts = [f"<b>{html.escape(row['species'])}</b>"]
     parts.append(row["date"])
     if row["location"]:
-        parts.append(f"📍 {row['location']}")
+        loc = html.escape(row["location"])
+        parts.append(f'📍 <a href="{maps_link(row["location"])}">{loc}</a>')
     if row["observer"]:
         parts.append(f"👤 {row['observer']}")
     if row["notes"]:
@@ -247,7 +259,8 @@ def _append_one(builder, row):
     if count and count > 1:
         builder.add(f" ({count} sightings within last 3 months)")
     if row["location"]:
-        builder.add(f"\n   📍 {row['location']}")
+        builder.add("\n   📍 ")
+        builder.add_link(row["location"], maps_link(row["location"]))
     if row["observer"]:
         builder.add(f"\n   👤 {row['observer']}")
     if row["notes"]:
