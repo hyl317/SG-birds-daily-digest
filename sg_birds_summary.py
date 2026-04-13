@@ -425,6 +425,11 @@ Messages:
         f.write(f"\n<!-- Auto-detected {datetime.now(SG_TZ).strftime('%d %b %Y')} -->\n")
         f.write(result + "\n")
 
+    # Retroactively fix "unidentified (acronym: X)" rows whose X is now known.
+    fixed = db.backfill_orphan_acronyms(db.parse_acronym_map(ACRONYMS_PATH))
+    if fixed:
+        print(f"Backfilled {fixed} orphan acronym row(s)")
+
 
 async def send_telegram(client, subject, window, body, send_to=None):
     """Send the summary to Telegram. Defaults to Saved Messages if send_to is None."""

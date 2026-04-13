@@ -47,6 +47,13 @@ CREATE TRIGGER IF NOT EXISTS sightings_ad AFTER DELETE ON sightings BEGIN
   INSERT INTO sightings_fts(sightings_fts, rowid, species, location, observer, notes)
   VALUES('delete', old.id, old.species, old.location, old.observer, old.notes);
 END;
+
+CREATE TRIGGER IF NOT EXISTS sightings_au AFTER UPDATE ON sightings BEGIN
+  INSERT INTO sightings_fts(sightings_fts, rowid, species, location, observer, notes)
+  VALUES('delete', old.id, old.species, old.location, old.observer, old.notes);
+  INSERT INTO sightings_fts(rowid, species, location, observer, notes)
+  VALUES (new.id, new.species, new.location, new.observer, new.notes);
+END;
 """
 
 
@@ -115,8 +122,9 @@ def _build_fts_query(query, acronym_map=None):
     Convert a user query into an FTS5 expression.
 
     Each token becomes a prefix-match clause. If a token matches a known acronym
-    (case-insensitive), it expands to (acronym OR (expansion tokens)) so that
-    rows containing either the acronym OR its full form are matched.
+    (case-insensitive), it is replaced by its expansion (all expansion words
+    required). The literal acronym is dropped to avoid matching stray mentions
+    in notes (e.g. "CSE should be crested serpent eagle" in an unrelated row).
     """
     tokens = [t for t in query.strip().split() if t]
     if not tokens:
@@ -130,7 +138,7 @@ def _build_fts_query(query, acronym_map=None):
             exp_tokens = [t for t in re.findall(r"\w+", expansion) if t]
             if exp_tokens:
                 exp_clause = " ".join(f'"{t}"*' for t in exp_tokens)
-                clauses.append(f'("{tok}"* OR ({exp_clause}))')
+                clauses.append(f'({exp_clause})')
                 continue
         clauses.append(f'"{tok}"*')
     return " ".join(clauses)
@@ -185,6 +193,57 @@ def prune_older_than(days=90, db_path=DEFAULT_DB_PATH):
             conn.execute("INSERT INTO sightings_fts(sightings_fts) VALUES('optimize')")
             conn.commit()
         return deleted
+    finally:
+        conn.close()
+
+
+_ORPHAN_RE = re.compile(r"^unidentified\s*\(acronym:\s*([A-Za-z][\w-]*)\s*\)\s*$", re.I)
+
+
+def parse_acronym_map(path):
+    """Parse acronyms.md into {ACRONYM: expansion}. Uppercase keys, parenthetical suffixes stripped."""
+    if not os.path.exists(path):
+        return {}
+    line_re = re.compile(r"^\s*-\s*([A-Za-z][\w-]*)\s*=\s*(.+?)\s*$")
+    result = {}
+    with open(path) as f:
+        for line in f:
+            m = line_re.match(line)
+            if not m:
+                continue
+            value = re.sub(r"\s*\([^)]*\)\s*$", "", m.group(2)).strip()
+            if value:
+                result[m.group(1).upper()] = value
+    return result
+
+
+def backfill_orphan_acronyms(acronym_map, db_path=DEFAULT_DB_PATH):
+    """
+    Rewrite rows stored as "unidentified (acronym: X)" to the real species name
+    when X is now known in acronym_map. These rows were written by the summarizer
+    when the acronym wasn't yet in acronyms.md; without this backfill they stay
+    unreachable via the bot's expansion-based search.
+
+    Returns the number of rows updated.
+    """
+    if not acronym_map:
+        return 0
+    init_db(db_path)
+    conn = connect(db_path)
+    try:
+        cur = conn.execute("SELECT id, species FROM sightings WHERE species LIKE 'unidentified (acronym:%'")
+        updates = []
+        for row in cur.fetchall():
+            m = _ORPHAN_RE.match(row["species"])
+            if not m:
+                continue
+            key = m.group(1).upper()
+            if key in acronym_map:
+                updates.append((acronym_map[key], row["id"]))
+        if updates:
+            conn.executemany("UPDATE sightings SET species = ? WHERE id = ?", updates)
+            conn.commit()
+        return len(updates)
     finally:
         conn.close()
 

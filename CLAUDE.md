@@ -73,6 +73,14 @@ cat /tmp/sg_birds_bot.log
 
 The bot does NOT need to be added to the source group — inline queries work from anywhere.
 
+## Workflow
+
+- Whenever changes are made to `bot.py` (or anything else that affects the running inline-query bot), relaunch the bot afterward so the changes take effect:
+  ```bash
+  launchctl unload ~/Library/LaunchAgents/com.hyl.sgbirds-bot.plist
+  launchctl load ~/Library/LaunchAgents/com.hyl.sgbirds-bot.plist
+  ```
+
 ## Notes
 
 - First run of the userbot must be manual for Telegram phone-number login.

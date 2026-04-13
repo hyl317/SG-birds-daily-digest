@@ -25,9 +25,7 @@
 <!-- Auto-detected 02 Apr 2026 -->
 - KF = Kingfisher
 - JLG = Jurong Lake Garden
-- CSE = Chestnut-winged Cuckoo (unconfirmed)
-- PIN = Photo/Information Note (unconfirmed)
-- TIA = Thanks In Advance
+- CSE = Crested Serpent Eagle
 
 <!-- Auto-detected 03 Apr 2026 -->
 - BTNR = Bukit Timah Nature Reserve
@@ -35,65 +33,38 @@
 - MED = Marina East Drive
 
 <!-- Auto-detected 05 Apr 2026 -->
-- FOMO = Fear Of Missing Out
-- PSP = Pasir Ris Park (unconfirmed)
-- KC = Kingfisher/Kestrel (unconfirmed)
 - AOB = Asian Openbill
-- PSA = Public Service Announcement
 - CSO = Collared Scops Owl
-- HP = Hand Phone/Camera
-- BK = Brahmin Kite
+- BK = Brahminy Kite
 - FP = Fairy Pitta
 
 <!-- Auto-detected 05 Apr 2026 -->
-- fw = freshwater (pond)
 - GBTB = Gardens by the Bay
 - ECP = East Coast Park
-- NB = Barn Owl (unconfirmed)
-- MIA = Missing In Action
 
 <!-- Auto-detected 06 Apr 2026 -->
 - juv = juvenile
-- APSC = APS-C (camera sensor format)
 
 <!-- Auto-detected 07 Apr 2026 -->
-- Wtkf = What the kingfisher (unconfirmed)
 - NEA = National Environment Agency
 
-<!-- Auto-detected 08 Apr 2026 -->
-- OCBC = OCBC Building (unconfirmed)
-
-<!-- Auto-detected 09 Apr 2026 -->
-NONE
-
-All acronyms used in these messages are already in the known acronyms list:
-- PF (Peregrine Falcon)
-- SBG (Singapore Botanic Gardens)
-
-<!-- Auto-detected 10 Apr 2026 -->
-NONE
-
-All acronyms used in these messages are already in the known acronyms list:
-- PF (Peregrine Falcon)
-- SBG (Singapore Botanic Gardens)
-- FP (Fairy Pitta)
-- CBD (Central Business District)
 
 <!-- Auto-detected 11 Apr 2026 -->
-- SWO = Scops Owl (unconfirmed)
+- SWO = Spotted Woods Owl
 - SBWR = Sungei Buloh Wetland Reserve
-- FL = Focal Length
 - BAMK = Bishan-Ang Mo Kio Park
-- SBNR = Singapore Bukit Nature Reserve (unconfirmed)
-- BEKF = Black Eagle-Kingfisher (unconfirmed)
+- BEKF = Blue Eared Kingfisher
 
 <!-- Auto-detected 12 Apr 2026 -->
 - TEG = Tampines Eco Green
-- ORP = Orchard Road/Area (unconfirmed)
-- FWD = Forward/Location (unconfirmed)
-- vsb = Von Shrenk's Bittern (unconfirmed)
-- POI = Point of Interest
-- juvie = juvenile
-- BAMK = Bishan-Ang Mo Kio Park
 - BHO = Brown Hawk Owl
-- SBG = Singapore Botanic Gardens (already known, but confirmed in context)
+- CKF = Common Kingfisher
+
+<!-- Manually added 13 Apr 2026 -->
+- MNH = Malayan Night Heron
+- BWP = Blue-winged Pitta
+- OHB = Oriental Honey Buzzard
+- CHE = Changeable Hawk Eagle
+- GHFE = Grey-headed Fish Eagle
+- YRFC = Yellow-rumped Flycatcher
+- RUDDY = Ruddy Kingfisher

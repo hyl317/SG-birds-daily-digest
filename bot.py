@@ -16,6 +16,7 @@ Setup:
   4. Run: python bot.py
 """
 
+import asyncio
 import json
 import os
 import re
@@ -409,11 +410,37 @@ async def on_message(event):
         await event.reply(msg_text, formatting_entities=entities, link_preview=False)
 
 
+HEALTH_INTERVAL = 120  # seconds between get_me() pings
+HEALTH_TIMEOUT = 30    # seconds to wait for a response
+
+
+async def _health_loop():
+    """
+    Periodically ping Telegram via get_me(). If the call hangs or raises, the
+    Telethon connection is stuck (seen in practice after "Connection reset by
+    peer" storms) — exit hard so launchd's KeepAlive respawns us cleanly.
+    """
+    while True:
+        await asyncio.sleep(HEALTH_INTERVAL)
+        try:
+            await asyncio.wait_for(bot.get_me(), timeout=HEALTH_TIMEOUT)
+        except BaseException as e:
+            print(f"Health check failed ({e!r}) — exiting for respawn", flush=True)
+            os._exit(1)
+
+
+async def _run():
+    print("SG Birds bot starting...", flush=True)
+    print(f"DB: {db.DEFAULT_DB_PATH} ({db.count()} sightings)", flush=True)
+    print("Modes: DM chat + inline queries", flush=True)
+    asyncio.create_task(_health_loop())
+    await bot.run_until_disconnected()
+    print("Bot disconnected — exiting for respawn", flush=True)
+    os._exit(1)
+
+
 def main():
-    print("SG Birds bot starting...")
-    print(f"DB: {db.DEFAULT_DB_PATH} ({db.count()} sightings)")
-    print("Modes: DM chat + inline queries")
-    bot.run_until_disconnected()
+    bot.loop.run_until_complete(_run())
 
 
 if __name__ == "__main__":
