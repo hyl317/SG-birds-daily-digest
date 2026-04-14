@@ -181,6 +181,22 @@ def test_geocode_candidates_http_error_returns_empty():
         assert ebird.geocode_candidates("foster city") == ()
 
 
+def test_geocode_candidates_natural_class_accepted():
+    # Mountains/forests/reserves come back as class=natural — common birding
+    # sites, must not be filtered out. Regression: "gunung panti" (Johor).
+    payload = [
+        {"class": "natural", "type": "peak", "lat": "1.8833", "lon": "103.9167",
+         "display_name": "Gunung Panti Timur, Kota Tinggi, Johor, Malaysia"},
+        {"class": "highway", "type": "track", "lat": "1.88", "lon": "103.91",
+         "display_name": "Gunung Panti track"},
+    ]
+    with patch("ebird.requests.get", return_value=_mock_response(payload)):
+        result = ebird.geocode_candidates("gunung panti")
+    assert len(result) == 1
+    assert "Gunung Panti" in result[0][2]
+    assert result[0][0] == 1.8833
+
+
 def test_geocode_candidates_boundary_class_accepted():
     payload = [
         {"class": "boundary", "type": "administrative", "lat": "1.29", "lon": "103.85",

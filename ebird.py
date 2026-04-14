@@ -30,8 +30,9 @@ def geocode_candidates(query, limit=5):
     Resolve a free-text place name to up to `limit` (lat, lng, display_name)
     candidates via Nominatim, ordered by Nominatim's importance score.
 
-    Filters out POIs (keeps only class in {place, boundary}) so species-like
-    queries don't accidentally match a "Fairy Pitta Restaurant". Dedupes by
+    Filters out POIs (keeps only class in {place, boundary, natural}) so
+    species-like queries don't accidentally match a "Fairy Pitta Restaurant",
+    while still catching mountains/forests/reserves (natural). Dedupes by
     display_name. Returns [] on HTTP failure, empty results, or if no
     candidate passes the class filter.
     """
@@ -50,7 +51,7 @@ def geocode_candidates(query, limit=5):
     out = []
     seen = set()
     for item in results:
-        if item.get("class") not in ("place", "boundary"):
+        if item.get("class") not in ("place", "boundary", "natural"):
             continue
         name = item.get("display_name") or query
         if name in seen:
