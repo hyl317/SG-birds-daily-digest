@@ -54,6 +54,13 @@ EBIRD_BACK_DAYS = 30
 PENDING_GEO_CHOICES = OrderedDict()
 PENDING_GEO_MAX = 256  # FIFO-evict when exceeded
 
+# Resolved coordinates + label for refine-keyboard taps. Same FIFO LRU pattern.
+PENDING_EBIRD_QUERIES = OrderedDict()
+PENDING_EBIRD_MAX = 256
+
+REFINE_RADII = [5, 10, 20, 50]  # km
+REFINE_DAYS = [7, 14, 30, 60]
+
 # Optional: source group ID, used to build deep links back to original messages.
 # Read from group_config.json if available so links work in the inline results.
 GROUP_ID = None
@@ -216,13 +223,13 @@ def _coord_maps_link(lat, lng):
     return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
 
 
-def _append_ebird_row(builder, row):
+def _append_ebird_row(builder, row, back_days):
     builder.add("• ")
     builder.add_bold(row["species"])
     builder.add(f" — {row['date']}")
     count = row.get("_count")
     if count and count > 1:
-        builder.add(f" ({count} sightings in last {EBIRD_BACK_DAYS} days)")
+        builder.add(f" ({count} sightings in last {back_days} days)")
     howmany = row.get("count")
     if howmany:
         builder.add(f" [x{howmany}]")
@@ -233,28 +240,28 @@ def _append_ebird_row(builder, row):
         builder.add("\n   ⭐ notable")
 
 
-def build_ebird_messages(header_place, rows, visible=5):
+def build_ebird_messages(header_place, rows, dist_km, back_days, visible=5):
     """Build reply messages for eBird results. Mirrors build_chat_messages."""
     if not rows:
         b = MessageBuilder()
         b.add("No eBird sightings within ")
-        b.add(f"{EBIRD_DIST_KM} km of ")
+        b.add(f"{dist_km} km of ")
         b.add_bold(header_place)
-        b.add(f" in the last {EBIRD_BACK_DAYS} days.")
+        b.add(f" in the last {back_days} days.")
         return [_finalize(b)]
 
     messages = []
     n = len(rows)
     b = MessageBuilder()
     b.add_bold(f"{n} species near {header_place}")
-    b.add(f"\n(eBird · {EBIRD_DIST_KM} km · last {EBIRD_BACK_DAYS} days)\n\n")
+    b.add(f"\n(eBird · {dist_km} km · last {back_days} days)\n\n")
     for row in rows[:visible]:
-        _append_ebird_row(b, row)
+        _append_ebird_row(b, row, back_days)
         b.add("\n\n")
 
     if n > visible:
         b.add(f"Tap to expand {n - visible} more:\n")
-        next_idx = _pack_ebird_into_blockquote(b, rows, visible)
+        next_idx = _pack_ebird_into_blockquote(b, rows, visible, back_days)
     else:
         next_idx = n
     messages.append(_finalize(b))
@@ -264,7 +271,7 @@ def build_ebird_messages(header_place, rows, visible=5):
         b.add_bold("More results (cont'd):")
         b.add("\n")
         prev_idx = next_idx
-        next_idx = _pack_ebird_into_blockquote(b, rows, next_idx)
+        next_idx = _pack_ebird_into_blockquote(b, rows, next_idx, back_days)
         if next_idx == prev_idx:
             next_idx += 1
         messages.append(_finalize(b))
@@ -272,14 +279,14 @@ def build_ebird_messages(header_place, rows, visible=5):
     return messages
 
 
-def _pack_ebird_into_blockquote(builder, rows, start_idx):
+def _pack_ebird_into_blockquote(builder, rows, start_idx, back_days):
     if start_idx >= len(rows):
         return start_idx
     bq_start = builder.offset
     idx = start_idx
     while idx < len(rows):
         snap = builder.snapshot()
-        _append_ebird_row(builder, rows[idx])
+        _append_ebird_row(builder, rows[idx], back_days)
         if idx < len(rows) - 1:
             builder.add("\n\n")
         if len(builder.text) > MAX_MSG_CHARS:
@@ -426,9 +433,14 @@ async def on_help(event):
     await event.reply(HELP, parse_mode="html")
 
 
-async def _reply_messages(event, messages):
-    for msg_text, entities in messages:
-        await event.reply(msg_text, formatting_entities=entities, link_preview=False)
+async def _reply_messages(event, messages, buttons=None):
+    """Reply with each message in sequence. Buttons (if any) attach to the LAST message."""
+    last_idx = len(messages) - 1
+    for i, (msg_text, entities) in enumerate(messages):
+        kwargs = {"formatting_entities": entities, "link_preview": False}
+        if buttons is not None and i == last_idx:
+            kwargs["buttons"] = buttons
+        await event.reply(msg_text, **kwargs)
 
 
 def _stash_geo_choices(candidates):
@@ -439,6 +451,44 @@ def _stash_geo_choices(candidates):
     while len(PENDING_GEO_CHOICES) > PENDING_GEO_MAX:
         PENDING_GEO_CHOICES.popitem(last=False)
     return token
+
+
+def _stash_ebird_query(lat, lng, place_label, dist_km, back_days):
+    """Store coordinates + pending refine state. pending_* start equal to the active
+    values and are mutated as the user taps radius/days buttons; 'Run' commits them."""
+    token = secrets.token_hex(4)
+    PENDING_EBIRD_QUERIES[token] = {
+        "lat": lat,
+        "lng": lng,
+        "place": place_label,
+        "pending_dist": dist_km,
+        "pending_days": back_days,
+    }
+    PENDING_EBIRD_QUERIES.move_to_end(token)
+    while len(PENDING_EBIRD_QUERIES) > PENDING_EBIRD_MAX:
+        PENDING_EBIRD_QUERIES.popitem(last=False)
+    return token
+
+
+def _build_refine_keyboard(token, pending_dist, pending_days):
+    """
+    Inline keyboard with preset radii (km) and timeframes (days), plus a Run button.
+    ✓ marks show the staged selection (what Run will fetch), not necessarily what's
+    currently displayed above. Radius/days taps only update marks; Run commits.
+    """
+    def fmt(val, cur, suffix):
+        return f"✓ {val}{suffix}" if val == cur else f"{val}{suffix}"
+
+    radius_row = [
+        Button.inline(fmt(r, pending_dist, "km"), data=f"refine:{token}:r:{r}".encode())
+        for r in REFINE_RADII
+    ]
+    days_row = [
+        Button.inline(fmt(d, pending_days, "d"), data=f"refine:{token}:d:{d}".encode())
+        for d in REFINE_DAYS
+    ]
+    run_row = [Button.inline("🔍 Run", data=f"refine:{token}:run:0".encode())]
+    return [radius_row, days_row, run_row]
 
 
 def _short_label(display_name, max_len=40):
@@ -467,23 +517,53 @@ async def _send_geo_picker(event, candidates):
     )
 
 
-async def _handle_ebird_at(event, lat, lng, place_label):
-    """Fetch eBird results at (lat, lng) and reply. place_label is shown in the header."""
+async def _send_ebird_picker(event, lat, lng, place_label):
+    """
+    Post a picker message BEFORE running any eBird query. The user stages their
+    preferred radius/days with the buttons and hits 🔍 Run to actually search.
+    Defaults to EBIRD_DIST_KM / EBIRD_BACK_DAYS.
+    """
     if not EBIRD_API_KEY:
         await event.reply(
             "eBird lookups aren't configured on this bot. Set EBIRD_API_KEY in .env to enable them.",
             link_preview=False,
         )
         return
+    token = _stash_ebird_query(lat, lng, place_label, EBIRD_DIST_KM, EBIRD_BACK_DAYS)
+    buttons = _build_refine_keyboard(token, EBIRD_DIST_KM, EBIRD_BACK_DAYS)
+    await event.reply(
+        f"📍 **{place_label}**\n\n"
+        f"Pick a radius and a timeframe, then tap 🔍 Run.\n"
+        f"(defaults: {EBIRD_DIST_KM} km · last {EBIRD_BACK_DAYS} days)",
+        buttons=buttons,
+        link_preview=False,
+    )
+
+
+async def _handle_ebird_at(event, lat, lng, place_label, dist_km=None, back_days=None):
+    """Fetch eBird results at (lat, lng) and reply. place_label is shown in the header.
+    dist_km/back_days default to the global preset; the refine keyboard passes overrides."""
+    if not EBIRD_API_KEY:
+        await event.reply(
+            "eBird lookups aren't configured on this bot. Set EBIRD_API_KEY in .env to enable them.",
+            link_preview=False,
+        )
+        return
+    if dist_km is None:
+        dist_km = EBIRD_DIST_KM
+    if back_days is None:
+        back_days = EBIRD_BACK_DAYS
     rows = await asyncio.to_thread(
-        ebird.recent_near, lat, lng, EBIRD_API_KEY, EBIRD_DIST_KM, EBIRD_BACK_DAYS
+        ebird.recent_near, lat, lng, EBIRD_API_KEY, dist_km, back_days
     )
     if rows is None:
         await event.reply("eBird lookups aren't configured. Set EBIRD_API_KEY in .env.")
         return
     grouped = ebird.group_by_species(rows)
-    messages = build_ebird_messages(place_label, grouped, visible=5)
-    await _reply_messages(event, messages)
+    messages = build_ebird_messages(place_label, grouped, dist_km, back_days, visible=5)
+    token = _stash_ebird_query(lat, lng, place_label, dist_km, back_days)
+    buttons = _build_refine_keyboard(token, dist_km, back_days)
+    await _reply_messages(event, messages, buttons=buttons)
 
 
 @bot.on(events.NewMessage)
@@ -492,14 +572,14 @@ async def on_message(event):
     if not event.is_private:
         return
 
-    # Shared location pin → eBird at those coordinates
+    # Shared location pin → show picker before searching
     media = event.message.media if event.message else None
     if isinstance(media, (MessageMediaGeo, MessageMediaGeoLive)):
         geo = media.geo
         lat = float(geo.lat)
         lng = float(geo.long)
         place = await asyncio.to_thread(ebird.reverse_geocode, lat, lng) or f"{lat:.4f},{lng:.4f}"
-        await _handle_ebird_at(event, lat, lng, place)
+        await _send_ebird_picker(event, lat, lng, place)
         return
 
     text = (event.raw_text or "").strip()
@@ -515,7 +595,7 @@ async def on_message(event):
         non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])]
         if len(non_sg) == 1:
             lat, lng, display_name = non_sg[0]
-            await _handle_ebird_at(event, lat, lng, display_name)
+            await _send_ebird_picker(event, lat, lng, display_name)
         else:
             await _send_geo_picker(event, non_sg[:5])
         return
@@ -550,10 +630,65 @@ async def on_geo_choice(event):
     lat, lng, display_name = choices[idx]
     await event.answer()  # dismiss the loading spinner
     try:
-        await event.edit(f"Looking up **{_short_label(display_name)}**…", buttons=None)
+        await event.edit(f"Selected: **{_short_label(display_name)}**", buttons=None)
     except Exception:
         pass
-    await _handle_ebird_at(event, lat, lng, display_name)
+    await _send_ebird_picker(event, lat, lng, display_name)
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^refine:"))
+async def on_refine(event):
+    """
+    Radius/days taps stage the selection (update ✓ marks in place).
+    The Run tap commits and fetches with the staged values.
+    """
+    try:
+        _, token, kind, value = event.data.decode().split(":", 3)
+        value = int(value)
+    except Exception:
+        await event.answer("Invalid refine request.", alert=True)
+        return
+
+    stashed = PENDING_EBIRD_QUERIES.get(token)
+    if not stashed:
+        await event.answer("That search has expired — please query again.", alert=True)
+        return
+
+    if kind == "r":
+        stashed["pending_dist"] = value
+        await event.answer(f"Staged: {value} km")
+        try:
+            await event.edit(buttons=_build_refine_keyboard(
+                token, stashed["pending_dist"], stashed["pending_days"]
+            ))
+        except Exception:
+            pass
+        return
+
+    if kind == "d":
+        stashed["pending_days"] = value
+        await event.answer(f"Staged: {value} days")
+        try:
+            await event.edit(buttons=_build_refine_keyboard(
+                token, stashed["pending_dist"], stashed["pending_days"]
+            ))
+        except Exception:
+            pass
+        return
+
+    if kind == "run":
+        lat = stashed["lat"]
+        lng = stashed["lng"]
+        place_label = stashed["place"]
+        dist_km = stashed["pending_dist"]
+        back_days = stashed["pending_days"]
+        await event.answer(f"Searching {dist_km} km · {back_days} d…")
+        await _handle_ebird_at(
+            event, lat, lng, place_label, dist_km=dist_km, back_days=back_days
+        )
+        return
+
+    await event.answer("Unknown refine type.", alert=True)
 
 
 HEALTH_INTERVAL = 120  # seconds between get_me() pings
