@@ -11,7 +11,7 @@ import ebird
 @pytest.fixture(autouse=True)
 def clear_caches():
     """LRU caches on geocode/reverse_geocode persist across tests — clear them."""
-    ebird.geocode.cache_clear()
+    ebird.geocode_candidates.cache_clear()
     ebird.reverse_geocode.cache_clear()
     yield
 
@@ -87,7 +87,7 @@ def test_group_by_species_does_not_mutate_input():
 
 
 # ---------------------------------------------------------------------------
-# geocode
+# geocode_candidates
 # ---------------------------------------------------------------------------
 
 def _mock_response(json_data, status=200):
@@ -98,57 +98,97 @@ def _mock_response(json_data, status=200):
     return m
 
 
-def test_geocode_happy_path():
+def test_geocode_candidates_happy_path():
     payload = [
         {"class": "place", "lat": "37.5585", "lon": "-122.2711", "display_name": "Foster City, CA"},
     ]
     with patch("ebird.requests.get", return_value=_mock_response(payload)) as mock_get:
-        result = ebird.geocode("foster city")
-    assert result == (37.5585, -122.2711, "Foster City, CA")
+        result = ebird.geocode_candidates("foster city")
+    assert result == ((37.5585, -122.2711, "Foster City, CA"),)
     # Verify we sent a User-Agent (Nominatim requires it)
     _, kwargs = mock_get.call_args
     assert "User-Agent" in kwargs["headers"]
 
 
-def test_geocode_filters_out_pois():
-    # A restaurant named "Fairy Pitta" should NOT match
+def test_geocode_candidates_filters_out_pois():
     payload = [
         {"class": "amenity", "type": "restaurant", "lat": "1.3", "lon": "103.8",
          "display_name": "Fairy Pitta Restaurant"},
     ]
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
-        assert ebird.geocode("fairy pitta") is None
+        assert ebird.geocode_candidates("fairy pitta") == ()
 
 
-def test_geocode_prefers_place_over_poi():
-    # Even if a POI comes first, we only accept place/boundary class results
+def test_geocode_candidates_returns_only_place_class():
+    # POIs dropped, place kept
     payload = [
         {"class": "amenity", "lat": "1.0", "lon": "103.0", "display_name": "Some POI"},
         {"class": "place", "lat": "25.033", "lon": "121.5654", "display_name": "Taipei, Taiwan"},
     ]
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
-        result = ebird.geocode("taipei")
-    assert result == (25.033, 121.5654, "Taipei, Taiwan")
+        result = ebird.geocode_candidates("taipei")
+    assert result == ((25.033, 121.5654, "Taipei, Taiwan"),)
 
 
-def test_geocode_empty_results():
+def test_geocode_candidates_returns_multiple_for_ambiguous():
+    payload = [
+        {"class": "place", "lat": "52.2053", "lon": "0.1218",
+         "display_name": "Cambridge, Cambridgeshire, England, United Kingdom"},
+        {"class": "place", "lat": "42.3736", "lon": "-71.1097",
+         "display_name": "Cambridge, Middlesex County, Massachusetts, United States"},
+        {"class": "place", "lat": "-37.8793", "lon": "175.4791",
+         "display_name": "Cambridge, Waipa District, Waikato, New Zealand"},
+    ]
+    with patch("ebird.requests.get", return_value=_mock_response(payload)):
+        result = ebird.geocode_candidates("cambridge")
+    assert len(result) == 3
+    # Nominatim order is preserved
+    assert "United Kingdom" in result[0][2]
+    assert "United States" in result[1][2]
+    assert "New Zealand" in result[2][2]
+
+
+def test_geocode_candidates_dedupes_by_display_name():
+    payload = [
+        {"class": "place", "lat": "1.0", "lon": "2.0", "display_name": "Foo"},
+        {"class": "place", "lat": "1.01", "lon": "2.01", "display_name": "Foo"},  # dup
+        {"class": "place", "lat": "3.0", "lon": "4.0", "display_name": "Bar"},
+    ]
+    with patch("ebird.requests.get", return_value=_mock_response(payload)):
+        result = ebird.geocode_candidates("foo")
+    assert len(result) == 2
+    assert result[0][2] == "Foo"
+    assert result[1][2] == "Bar"
+
+
+def test_geocode_candidates_respects_limit():
+    payload = [
+        {"class": "place", "lat": f"{i}.0", "lon": f"{i}.0", "display_name": f"Place {i}"}
+        for i in range(10)
+    ]
+    with patch("ebird.requests.get", return_value=_mock_response(payload)):
+        result = ebird.geocode_candidates("many", limit=3)
+    assert len(result) == 3
+
+
+def test_geocode_candidates_empty_results():
     with patch("ebird.requests.get", return_value=_mock_response([])):
-        assert ebird.geocode("asdfghjkl") is None
+        assert ebird.geocode_candidates("asdfghjkl") == ()
 
 
-def test_geocode_http_error_returns_none():
+def test_geocode_candidates_http_error_returns_empty():
     with patch("ebird.requests.get", side_effect=requests.RequestException("boom")):
-        assert ebird.geocode("foster city") is None
+        assert ebird.geocode_candidates("foster city") == ()
 
 
-def test_geocode_boundary_class_accepted():
+def test_geocode_candidates_boundary_class_accepted():
     payload = [
         {"class": "boundary", "type": "administrative", "lat": "1.29", "lon": "103.85",
          "display_name": "Singapore"},
     ]
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
-        result = ebird.geocode("singapore")
-    assert result == (1.29, 103.85, "Singapore")
+        result = ebird.geocode_candidates("singapore")
+    assert result == ((1.29, 103.85, "Singapore"),)
 
 
 # ---------------------------------------------------------------------------

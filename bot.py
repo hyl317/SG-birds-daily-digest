@@ -19,8 +19,11 @@ import os
 import re
 import urllib.parse
 
+import secrets
+from collections import OrderedDict
+
 from dotenv import load_dotenv
-from telethon import TelegramClient, events
+from telethon import Button, TelegramClient, events
 from telethon.tl.types import (
     MessageEntityBlockquote,
     MessageEntityBold,
@@ -44,6 +47,12 @@ EBIRD_API_KEY = os.environ.get("EBIRD_API_KEY")
 
 EBIRD_DIST_KM = 10
 EBIRD_BACK_DAYS = 30
+
+# Pending geocode disambiguation choices. Keyed by a short random token that
+# we stuff into inline button callback_data (which is capped at 64 bytes).
+# Values are the full candidate list; we resolve lat/lng on button tap.
+PENDING_GEO_CHOICES = OrderedDict()
+PENDING_GEO_MAX = 256  # FIFO-evict when exceeded
 
 # Optional: source group ID, used to build deep links back to original messages.
 # Read from group_config.json if available so links work in the inline results.
@@ -422,6 +431,42 @@ async def _reply_messages(event, messages):
         await event.reply(msg_text, formatting_entities=entities, link_preview=False)
 
 
+def _stash_geo_choices(candidates):
+    """Store a candidate list and return a short token for callback data."""
+    token = secrets.token_hex(4)  # 8 hex chars
+    PENDING_GEO_CHOICES[token] = list(candidates)
+    PENDING_GEO_CHOICES.move_to_end(token)
+    while len(PENDING_GEO_CHOICES) > PENDING_GEO_MAX:
+        PENDING_GEO_CHOICES.popitem(last=False)
+    return token
+
+
+def _short_label(display_name, max_len=40):
+    """Compact Nominatim display_name for an inline button label."""
+    parts = [p.strip() for p in display_name.split(",")]
+    if len(parts) >= 3:
+        compact = f"{parts[0]}, {parts[-1]}"  # e.g. "Cambridge, United Kingdom"
+    else:
+        compact = display_name
+    if len(compact) > max_len:
+        compact = compact[: max_len - 1] + "…"
+    return compact
+
+
+async def _send_geo_picker(event, candidates):
+    """Reply with an inline keyboard asking the user to pick among candidates."""
+    token = _stash_geo_choices(candidates)
+    buttons = [
+        [Button.inline(_short_label(name), data=f"geo:{token}:{i}".encode())]
+        for i, (_, _, name) in enumerate(candidates)
+    ]
+    await event.reply(
+        f"Found {len(candidates)} places matching your query — which one?",
+        buttons=buttons,
+        link_preview=False,
+    )
+
+
 async def _handle_ebird_at(event, lat, lng, place_label):
     """Fetch eBird results at (lat, lng) and reply. place_label is shown in the header."""
     if not EBIRD_API_KEY:
@@ -462,19 +507,53 @@ async def on_message(event):
     if not text or text.startswith("/"):
         return
 
-    # Text query: geocode first. If it resolves outside SG, route to eBird.
-    geo_result = await asyncio.to_thread(ebird.geocode, text)
-    if geo_result is not None:
-        lat, lng, display_name = geo_result
-        if not ebird.is_in_sg(lat, lng):
-            await _handle_ebird_at(event, lat, lng, display_name)
-            return
+    # Text query: geocode first. Top candidate decides routing.
+    candidates = await asyncio.to_thread(ebird.geocode_candidates, text)
+    top_in_sg = bool(candidates) and ebird.is_in_sg(candidates[0][0], candidates[0][1])
 
-    # Default path: local SG archive search
+    if candidates and not top_in_sg:
+        non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])]
+        if len(non_sg) == 1:
+            lat, lng, display_name = non_sg[0]
+            await _handle_ebird_at(event, lat, lng, display_name)
+        else:
+            await _send_geo_picker(event, non_sg[:5])
+        return
+
+    # Default path: local SG archive search (also covers SG-top-candidate
+    # and queries that don't geocode at all, like species names)
     rows = db.search(text, limit=100, acronym_map=ACRONYM_MAP)
     rows = maybe_dedupe_by_species(rows)
     messages = build_chat_messages(text, rows, visible=5)
     await _reply_messages(event, messages)
+
+
+@bot.on(events.CallbackQuery(pattern=rb"^geo:"))
+async def on_geo_choice(event):
+    """User tapped a disambiguation button — resolve to lat/lng and run eBird."""
+    try:
+        _, token, idx_str = event.data.decode().split(":", 2)
+        idx = int(idx_str)
+    except Exception:
+        await event.answer("Invalid selection.", alert=True)
+        return
+
+    choices = PENDING_GEO_CHOICES.pop(token, None)
+    if not choices or idx < 0 or idx >= len(choices):
+        await event.answer("That selection has expired — please search again.", alert=True)
+        try:
+            await event.edit("(selection expired)", buttons=None)
+        except Exception:
+            pass
+        return
+
+    lat, lng, display_name = choices[idx]
+    await event.answer()  # dismiss the loading spinner
+    try:
+        await event.edit(f"Looking up **{_short_label(display_name)}**…", buttons=None)
+    except Exception:
+        pass
+    await _handle_ebird_at(event, lat, lng, display_name)
 
 
 HEALTH_INTERVAL = 120  # seconds between get_me() pings

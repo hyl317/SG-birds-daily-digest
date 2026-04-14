@@ -25,29 +25,42 @@ def is_in_sg(lat, lng):
 
 
 @functools.lru_cache(maxsize=256)
-def geocode(query):
+def geocode_candidates(query, limit=5):
     """
-    Resolve a free-text place name to (lat, lng, display_name) via Nominatim.
-    Returns None if no confident match. Filters out POIs to avoid random
-    amenity hits for species-like queries.
+    Resolve a free-text place name to up to `limit` (lat, lng, display_name)
+    candidates via Nominatim, ordered by Nominatim's importance score.
+
+    Filters out POIs (keeps only class in {place, boundary}) so species-like
+    queries don't accidentally match a "Fairy Pitta Restaurant". Dedupes by
+    display_name. Returns [] on HTTP failure, empty results, or if no
+    candidate passes the class filter.
     """
     try:
         r = requests.get(
             f"{NOMINATIM_BASE}/search",
-            params={"q": query, "format": "json", "limit": 5, "addressdetails": 0},
+            params={"q": query, "format": "json", "limit": 10, "addressdetails": 0},
             headers={"User-Agent": USER_AGENT},
             timeout=10,
         )
         r.raise_for_status()
         results = r.json()
     except Exception:
-        return None
+        return ()
 
+    out = []
+    seen = set()
     for item in results:
-        cls = item.get("class")
-        if cls in ("place", "boundary"):
-            return (float(item["lat"]), float(item["lon"]), item.get("display_name") or query)
-    return None
+        if item.get("class") not in ("place", "boundary"):
+            continue
+        name = item.get("display_name") or query
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append((float(item["lat"]), float(item["lon"]), name))
+        if len(out) >= limit:
+            break
+    # Return a tuple so the lru_cache can hash it
+    return tuple(out)
 
 
 @functools.lru_cache(maxsize=256)
