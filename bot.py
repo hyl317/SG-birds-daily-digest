@@ -17,7 +17,6 @@ import asyncio
 import json
 import os
 import re
-import subprocess
 import urllib.parse
 
 import secrets
@@ -51,14 +50,20 @@ EBIRD_BACK_DAYS = 30
 
 
 def _git_sha():
-    """Short git SHA of the running checkout, used by /ping for deploy verification."""
+    """
+    Short git SHA of the running checkout, used by /ping for deploy verification.
+    Reads .git/HEAD directly (and the ref it points at) instead of spawning git,
+    so it works under systemd where PATH may not include the git binary.
+    """
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=PROJECT_DIR,
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
+        head_path = os.path.join(PROJECT_DIR, ".git", "HEAD")
+        with open(head_path) as f:
+            head = f.read().strip()
+        if head.startswith("ref: "):
+            ref_path = os.path.join(PROJECT_DIR, ".git", head[5:])
+            with open(ref_path) as f:
+                return f.read().strip()[:7]
+        return head[:7]
     except Exception:
         return "unknown"
 
