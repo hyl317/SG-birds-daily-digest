@@ -98,81 +98,130 @@ def _mock_response(json_data, status=200):
     return m
 
 
+def _photon_feature(name, lat, lng, key, value, country=None, state=None):
+    """Shape a Photon feature dict. All real Photon responses have this layout."""
+    props = {"name": name, "osm_key": key, "osm_value": value}
+    if country: props["country"] = country
+    if state: props["state"] = state
+    return {"properties": props, "geometry": {"coordinates": [lng, lat]}}
+
+
+def _photon_payload(*features):
+    return {"features": list(features)}
+
+
 def test_geocode_candidates_happy_path():
-    payload = [
-        {"class": "place", "lat": "37.5585", "lon": "-122.2711", "display_name": "Foster City, CA"},
-    ]
+    payload = _photon_payload(
+        _photon_feature("Foster City", 37.5585, -122.2711, "place", "town",
+                        country="United States", state="California"),
+    )
     with patch("ebird.requests.get", return_value=_mock_response(payload)) as mock_get:
         result = ebird.geocode_candidates("foster city")
-    assert result == ((37.5585, -122.2711, "Foster City, CA"),)
-    # Verify we sent a User-Agent (Nominatim requires it)
+    assert result == ((37.5585, -122.2711, "Foster City, California, United States"),)
+    # Verify we sent a User-Agent (not strictly required by Photon, but good hygiene)
     _, kwargs = mock_get.call_args
     assert "User-Agent" in kwargs["headers"]
 
 
-def test_geocode_candidates_filters_out_pois():
-    payload = [
-        {"class": "amenity", "type": "restaurant", "lat": "1.3", "lon": "103.8",
-         "display_name": "Fairy Pitta Restaurant"},
-    ]
+def test_geocode_candidates_filters_out_restaurant():
+    payload = _photon_payload(
+        _photon_feature("Fairy Pitta Restaurant", 1.3, 103.8, "amenity", "restaurant",
+                        country="Singapore"),
+    )
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
         assert ebird.geocode_candidates("fairy pitta") == ()
 
 
-def test_geocode_candidates_returns_only_place_class():
-    # POIs dropped, place kept
-    payload = [
-        {"class": "amenity", "lat": "1.0", "lon": "103.0", "display_name": "Some POI"},
-        {"class": "place", "lat": "25.033", "lon": "121.5654", "display_name": "Taipei, Taiwan"},
-    ]
+def test_geocode_candidates_filters_out_shops_and_roads():
+    payload = _photon_payload(
+        _photon_feature("Birdwatcher Bookshop", 1.3, 103.8, "shop", "books"),
+        _photon_feature("Eagle Drive", 40.0, -120.0, "highway", "residential"),
+        _photon_feature("Heron Building", 1.3, 103.8, "building", "yes"),
+    )
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
-        result = ebird.geocode_candidates("taipei")
-    assert result == ((25.033, 121.5654, "Taipei, Taiwan"),)
+        assert ebird.geocode_candidates("eagle") == ()
+
+
+def test_geocode_candidates_keeps_tourism_attraction():
+    # Real regression: Rainforest Discovery Centre, Sabah is tagged
+    # tourism=attraction. Must not be filtered out.
+    payload = _photon_payload(
+        _photon_feature("Rainforest Discovery Centre", 5.8765, 117.9445,
+                        "tourism", "attraction", country="Malaysia", state="Sabah"),
+    )
+    with patch("ebird.requests.get", return_value=_mock_response(payload)):
+        result = ebird.geocode_candidates("rainforest discovery centre")
+    assert len(result) == 1
+    assert "Rainforest Discovery Centre" in result[0][2]
+    assert "Sabah" in result[0][2]
+    assert "Malaysia" in result[0][2]
+
+
+def test_geocode_candidates_keeps_natural_peak():
+    # Regression from the Nominatim-era fix: mountains are class=natural.
+    payload = _photon_payload(
+        _photon_feature("Gunung Panti Timur", 1.8833, 103.9167, "natural", "peak",
+                        country="Malaysia", state="Johor"),
+    )
+    with patch("ebird.requests.get", return_value=_mock_response(payload)):
+        result = ebird.geocode_candidates("gunung panti")
+    assert len(result) == 1
+    assert "Gunung Panti Timur" in result[0][2]
+
+
+def test_geocode_candidates_keeps_boundary_and_leisure():
+    payload = _photon_payload(
+        _photon_feature("Kaeng Krachan National Park", 12.82, 99.62,
+                        "boundary", "national_park", country="Thailand"),
+        _photon_feature("Point Pelee National Park", 41.95, -82.51,
+                        "leisure", "park", country="Canada"),
+    )
+    with patch("ebird.requests.get", return_value=_mock_response(payload)):
+        result = ebird.geocode_candidates("parks")
+    assert len(result) == 2
 
 
 def test_geocode_candidates_returns_multiple_for_ambiguous():
-    payload = [
-        {"class": "place", "lat": "52.2053", "lon": "0.1218",
-         "display_name": "Cambridge, Cambridgeshire, England, United Kingdom"},
-        {"class": "place", "lat": "42.3736", "lon": "-71.1097",
-         "display_name": "Cambridge, Middlesex County, Massachusetts, United States"},
-        {"class": "place", "lat": "-37.8793", "lon": "175.4791",
-         "display_name": "Cambridge, Waipa District, Waikato, New Zealand"},
-    ]
+    payload = _photon_payload(
+        _photon_feature("Cambridge", 52.2053, 0.1218, "place", "city", country="United Kingdom"),
+        _photon_feature("Cambridge", 42.3736, -71.1097, "place", "city",
+                        country="United States", state="Massachusetts"),
+        _photon_feature("Cambridge", -37.8793, 175.4791, "place", "town", country="New Zealand"),
+    )
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
         result = ebird.geocode_candidates("cambridge")
     assert len(result) == 3
-    # Nominatim order is preserved
     assert "United Kingdom" in result[0][2]
     assert "United States" in result[1][2]
     assert "New Zealand" in result[2][2]
 
 
-def test_geocode_candidates_dedupes_by_display_name():
-    payload = [
-        {"class": "place", "lat": "1.0", "lon": "2.0", "display_name": "Foo"},
-        {"class": "place", "lat": "1.01", "lon": "2.01", "display_name": "Foo"},  # dup
-        {"class": "place", "lat": "3.0", "lon": "4.0", "display_name": "Bar"},
-    ]
+def test_geocode_candidates_dedupes_by_name_and_location():
+    payload = _photon_payload(
+        _photon_feature("Foo", 1.0, 2.0, "place", "village", country="Vanuatu"),
+        _photon_feature("Foo", 1.00001, 2.00001, "place", "village", country="Vanuatu"),  # near-dup (same at 3dp)
+        _photon_feature("Bar", 3.0, 4.0, "place", "village", country="Vanuatu"),
+    )
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
         result = ebird.geocode_candidates("foo")
     assert len(result) == 2
-    assert result[0][2] == "Foo"
-    assert result[1][2] == "Bar"
+    names = [r[2] for r in result]
+    assert any("Foo" in n for n in names)
+    assert any("Bar" in n for n in names)
 
 
 def test_geocode_candidates_respects_limit():
-    payload = [
-        {"class": "place", "lat": f"{i}.0", "lon": f"{i}.0", "display_name": f"Place {i}"}
+    payload = _photon_payload(*[
+        _photon_feature(f"Place {i}", float(i), float(i), "place", "village")
         for i in range(10)
-    ]
+    ])
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
         result = ebird.geocode_candidates("many", limit=3)
     assert len(result) == 3
 
 
 def test_geocode_candidates_empty_results():
-    with patch("ebird.requests.get", return_value=_mock_response([])):
+    with patch("ebird.requests.get", return_value=_mock_response(_photon_payload())):
         assert ebird.geocode_candidates("asdfghjkl") == ()
 
 
@@ -181,30 +230,17 @@ def test_geocode_candidates_http_error_returns_empty():
         assert ebird.geocode_candidates("foster city") == ()
 
 
-def test_geocode_candidates_natural_class_accepted():
-    # Mountains/forests/reserves come back as class=natural — common birding
-    # sites, must not be filtered out. Regression: "gunung panti" (Johor).
-    payload = [
-        {"class": "natural", "type": "peak", "lat": "1.8833", "lon": "103.9167",
-         "display_name": "Gunung Panti Timur, Kota Tinggi, Johor, Malaysia"},
-        {"class": "highway", "type": "track", "lat": "1.88", "lon": "103.91",
-         "display_name": "Gunung Panti track"},
-    ]
+def test_geocode_candidates_skips_feature_missing_coords():
+    payload = _photon_payload(
+        # Coordinates missing — should be skipped, not crash
+        {"properties": {"name": "Nowhere", "osm_key": "place", "osm_value": "town",
+                        "country": "Atlantis"}, "geometry": {}},
+        _photon_feature("Real Place", 1.0, 2.0, "place", "town", country="Real"),
+    )
     with patch("ebird.requests.get", return_value=_mock_response(payload)):
-        result = ebird.geocode_candidates("gunung panti")
+        result = ebird.geocode_candidates("nowhere")
     assert len(result) == 1
-    assert "Gunung Panti" in result[0][2]
-    assert result[0][0] == 1.8833
-
-
-def test_geocode_candidates_boundary_class_accepted():
-    payload = [
-        {"class": "boundary", "type": "administrative", "lat": "1.29", "lon": "103.85",
-         "display_name": "Singapore"},
-    ]
-    with patch("ebird.requests.get", return_value=_mock_response(payload)):
-        result = ebird.geocode_candidates("singapore")
-    assert result == ((1.29, 103.85, "Singapore"),)
+    assert "Real Place" in result[0][2]
 
 
 # ---------------------------------------------------------------------------

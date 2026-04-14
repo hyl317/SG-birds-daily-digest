@@ -32,8 +32,10 @@ from telethon.tl.types import (
     MessageMediaGeoLive,
 )
 
+import classify
 import db
 import ebird
+import taxonomy
 
 load_dotenv()
 
@@ -117,6 +119,13 @@ def load_acronym_map():
 
 
 ACRONYM_MAP = load_acronym_map()
+
+# Load the eBird taxonomy into classify.py's lookup sets. Uses the
+# on-disk cache if fresh, otherwise fetches with EBIRD_API_KEY. Failure
+# is non-fatal: classify.py falls back to treating every query as
+# "location", which is the pre-classifier behaviour.
+_tax_count = taxonomy.load(api_key=EBIRD_API_KEY)
+print(f"Taxonomy: {_tax_count} entries loaded", flush=True)
 
 
 def maps_link(location):
@@ -618,22 +627,56 @@ async def on_message(event):
     if not text or text.startswith("/"):
         return
 
-    # Text query: geocode first. Top candidate decides routing.
-    candidates = await asyncio.to_thread(ebird.geocode_candidates, text)
-    top_in_sg = bool(candidates) and ebird.is_in_sg(candidates[0][0], candidates[0][1])
+    kind = classify.classify(text)
 
-    if candidates and not top_in_sg:
-        non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])]
-        if len(non_sg) == 1:
-            lat, lng, display_name = non_sg[0]
-            await _send_ebird_picker(event, lat, lng, display_name)
-        else:
-            await _send_geo_picker(event, non_sg[:5])
+    # Species query → local SG archive only. Exotic species (e.g. Sabah
+    # Partridge, Bornean Ground Cuckoo) correctly return "no results"
+    # instead of routing to a nonsense eBird location.
+    if kind == "species":
+        await _search_local(event, text)
         return
 
-    # Default path: local SG archive search (also covers SG-top-candidate
-    # and queries that don't geocode at all, like species names)
+    # Ambiguous query (place-with-bird-word like "hawk mountain",
+    # "eagle lake", "chinese garden") → try local archive first; if
+    # there's nothing, fall through to the geocoder.
+    if kind == "ambiguous":
+        rows = db.search(text, limit=100, acronym_map=ACRONYM_MAP)
+        if rows:
+            await _reply_local_rows(event, text, rows)
+            return
+        # fall through to geocoder
+
+    # Location query (or ambiguous with no local hits).
+    candidates = await asyncio.to_thread(ebird.geocode_candidates, text)
+    if not candidates:
+        # Geocoder came up empty — nothing to route to. Fall back to
+        # local DB search so the user at least sees a consistent
+        # "No sightings found" reply in the same format as everything else.
+        await _search_local(event, text)
+        return
+
+    top_in_sg = ebird.is_in_sg(candidates[0][0], candidates[0][1])
+    if top_in_sg:
+        # The user named a place inside SG (e.g. "Windsor Park",
+        # "Pulau Ubin") — the local archive has better data for those
+        # than eBird's regional feed, so search it.
+        await _search_local(event, text)
+        return
+
+    non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])]
+    if len(non_sg) == 1:
+        lat, lng, display_name = non_sg[0]
+        await _send_ebird_picker(event, lat, lng, display_name)
+    else:
+        await _send_geo_picker(event, non_sg[:5])
+
+
+async def _search_local(event, text):
     rows = db.search(text, limit=100, acronym_map=ACRONYM_MAP)
+    await _reply_local_rows(event, text, rows)
+
+
+async def _reply_local_rows(event, text, rows):
     rows = maybe_dedupe_by_species(rows)
     messages = build_chat_messages(text, rows, visible=5)
     await _reply_messages(event, messages)

@@ -1,16 +1,23 @@
 """
-eBird + Nominatim helpers for out-of-SG location queries.
+Geocoder + eBird helpers for out-of-SG location queries.
 
-The bot uses these to answer "what birds near <place>?" for anywhere in the
-world by (1) geocoding the place via Nominatim, (2) hitting eBird's
-/obs/geo/recent endpoint with the resulting lat/lng. SG queries still go to
-the local SQLite archive — see bot.on_message for routing.
+Forward geocoding uses Photon (OSM-backed, no API key) because Nominatim
+lacks full-text indexing and misses most POIs — Photon finds the
+Rainforest Discovery Centre, Gunung Panti, Kaeng Krachan, etc. that
+Nominatim returns nothing for. Reverse geocoding (used only to label
+GPS pins) stays on Nominatim; it's fine for that.
+
+The bot uses these to answer "what birds near <place>?" for anywhere in
+the world by (1) geocoding the place via Photon, (2) hitting eBird's
+/obs/geo/recent endpoint with the resulting lat/lng. SG queries still go
+to the local SQLite archive — see bot.on_message for routing.
 """
 
 import functools
 
 import requests
 
+PHOTON_BASE = "https://photon.komoot.io/api"
 NOMINATIM_BASE = "https://nominatim.openstreetmap.org"
 EBIRD_BASE = "https://api.ebird.org/v2"
 USER_AGENT = "sg-birds-bot/1.0 (https://github.com/hyl317/sg-birds-summary)"
@@ -19,45 +26,90 @@ USER_AGENT = "sg-birds-bot/1.0 (https://github.com/hyl317/sg-birds-summary)"
 SG_LAT_MIN, SG_LAT_MAX = 1.15, 1.48
 SG_LNG_MIN, SG_LNG_MAX = 103.6, 104.1
 
+# osm_key values that are almost always false positives for a "place"
+# lookup: shops, roads, individual buildings, railways, offices, crafts,
+# linear waterways (a river isn't a bird spot; a wetland is).
+_BLOCKED_OSM_KEYS = {
+    "shop", "highway", "building", "railway", "office", "craft",
+    "waterway", "barrier", "power", "man_made",
+}
+
+# For osm_key=amenity, almost all values are food/retail/civic noise.
+# Keep only the handful that overlap with nature/visitor centres.
+_ALLOWED_AMENITY_VALUES = {
+    "exhibition_centre", "community_centre", "townhall", "marketplace",
+    "place_of_worship",  # temples/shrines are sometimes the nearest named feature
+}
+
 
 def is_in_sg(lat, lng):
     return SG_LAT_MIN <= lat <= SG_LAT_MAX and SG_LNG_MIN <= lng <= SG_LNG_MAX
+
+
+def _photon_display_name(props, fallback):
+    """Build a human-readable label from a Photon feature's properties."""
+    name = props.get("name") or fallback
+    # Prefer state+country; fall back to country alone; avoid clutter
+    # from district/city when state is present.
+    parts = [p for p in (props.get("state"), props.get("country")) if p]
+    return f"{name}, {', '.join(parts)}" if parts else name
+
+
+def _photon_allowed(props):
+    """Apply the osm_key denylist / amenity allowlist."""
+    key = props.get("osm_key")
+    val = props.get("osm_value")
+    if key in _BLOCKED_OSM_KEYS:
+        return False
+    if key == "amenity" and val not in _ALLOWED_AMENITY_VALUES:
+        return False
+    if key == "tourism" and val in {"hotel", "motel", "guest_house", "hostel",
+                                     "apartment", "chalet", "camp_site"}:
+        return False
+    return True
 
 
 @functools.lru_cache(maxsize=256)
 def geocode_candidates(query, limit=5):
     """
     Resolve a free-text place name to up to `limit` (lat, lng, display_name)
-    candidates via Nominatim, ordered by Nominatim's importance score.
+    candidates via Photon, ordered by Photon's internal ranking.
 
-    Filters out POIs (keeps only class in {place, boundary, natural}) so
-    species-like queries don't accidentally match a "Fairy Pitta Restaurant",
-    while still catching mountains/forests/reserves (natural). Dedupes by
-    display_name. Returns [] on HTTP failure, empty results, or if no
-    candidate passes the class filter.
+    Filters out POI noise using a denylist (shop, highway, building, etc.)
+    and a small amenity allowlist, so random restaurants/roads don't
+    drown out actual birding sites. Dedupes by (name, state).
+
+    Returns an empty tuple on HTTP failure, empty results, or if no
+    candidate passes the filter.
     """
     try:
         r = requests.get(
-            f"{NOMINATIM_BASE}/search",
-            params={"q": query, "format": "json", "limit": 10, "addressdetails": 0},
+            PHOTON_BASE,
+            params={"q": query, "limit": 10},
             headers={"User-Agent": USER_AGENT},
             timeout=10,
         )
         r.raise_for_status()
-        results = r.json()
+        features = r.json().get("features", [])
     except Exception:
         return ()
 
     out = []
     seen = set()
-    for item in results:
-        if item.get("class") not in ("place", "boundary", "natural"):
+    for feat in features:
+        props = feat.get("properties") or {}
+        if not _photon_allowed(props):
             continue
-        name = item.get("display_name") or query
-        if name in seen:
+        coords = (feat.get("geometry") or {}).get("coordinates") or []
+        if len(coords) < 2:
             continue
-        seen.add(name)
-        out.append((float(item["lat"]), float(item["lon"]), name))
+        lng, lat = float(coords[0]), float(coords[1])
+        display_name = _photon_display_name(props, query)
+        dedupe_key = (display_name, round(lat, 3), round(lng, 3))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        out.append((lat, lng, display_name))
         if len(out) >= limit:
             break
     # Return a tuple so the lru_cache can hash it
