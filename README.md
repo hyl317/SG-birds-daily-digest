@@ -203,11 +203,14 @@ Handy for trip planning anywhere in the world. Requires an `EBIRD_API_KEY` in `.
 | `taipei` | Recent species around Taipei, Taiwan |
 | `kaeng krachan` | Recent species at/near Kaeng Krachan National Park, Thailand |
 
-**📍 Share a location pin → eBird at your exact coordinates**
+**📍 Share a location pin → eBird at any coordinates you choose**
 
-Tap the 📎 attach button in Telegram → **Location** → **Send My Current Location** (or pick a point on the map). The bot replies with recent eBird sightings near those coordinates — the fastest way to ask "what's being seen *right here, right now?*" while you're out in the field.
+Tap the 📎 attach button in Telegram → **Location**. From there you can either:
 
-Each result shows the species, date, count, and a Google Maps link to the exact hotspot.
+- **Send My Current Location** — uses your phone's GPS. Great in the field: "what's being seen *right here, right now?*"
+- **Pick a point on the map** — pan and zoom to anywhere in the world, tap to drop a pin, then send. Great for trip planning: scout a national park, a patch of coastline, a mountain ridge, or a random dot in the Amazon and see what's been reported there recently.
+
+The bot doesn't distinguish between the two — it just looks up recent eBird sightings at whichever lat/lng you sent. Each result shows the species, date, count, and a Google Maps link to the exact hotspot.
 
 ### Daily digest
 

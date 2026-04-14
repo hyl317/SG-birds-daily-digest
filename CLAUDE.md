@@ -77,11 +77,21 @@ The bot does NOT need to be added to the source group. Users just DM it privatel
 
 ## Workflow
 
-- Whenever changes are made to `bot.py` (or anything else that affects the running inline-query bot), relaunch the bot afterward so the changes take effect:
-  ```bash
-  launchctl unload ~/Library/LaunchAgents/com.hyl.sgbirds-bot.plist
-  launchctl load ~/Library/LaunchAgents/com.hyl.sgbirds-bot.plist
-  ```
+### Deployment target
+
+The always-on bot runs on a Hetzner VM:
+- Host: `root@178.104.152.177`
+- Code path: `/root/sg-birds/`
+- Venv: `/root/sg-birds/sg-birds-env`
+- Service: `sgbirds-bot.service` (systemd, `systemctl restart sgbirds-bot.service`)
+- Log: `/root/sg-birds/bot.log`
+
+Passwordless SSH is already set up. The daily summary (`sg_birds_summary.py`) still runs on the user's Mac via `launchd`.
+
+### Editing the bot
+
+- A PostToolUse hook in `.claude/settings.local.json` auto-runs `pytest tests/` every time `bot.py`, `ebird.py`, or any test file is edited. Watch its output for regressions before shipping.
+- When you're ready to deploy, invoke the `ship-bot` skill (defined in `.claude/skills/ship-bot/SKILL.md`). It runs the full test → commit → push → ssh-pull → restart → verify loop autonomously.
 
 ## Notes
 
