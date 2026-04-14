@@ -8,3 +8,6 @@ sightings.db
 sightings.db-*
 sg_birds_bot.session*
 .claude/
+bot.log
+sg-birds-env/
+summary.log
