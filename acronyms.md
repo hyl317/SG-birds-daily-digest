@@ -68,3 +68,8 @@
 - GHFE = Grey-headed Fish Eagle
 - YRFC = Yellow-rumped Flycatcher
 - RUDDY = Ruddy Kingfisher
+
+<!-- Auto-detected 13 Apr 2026 -->
+NONE
+
+All acronyms used in these messages (CSO, BHO, PRP, BAMK, SBG, PF, BW-Pitta) are already in the known acronyms list.

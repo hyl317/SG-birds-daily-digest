@@ -1,3 +1,5 @@
 telethon>=1.36
 anthropic>=0.40
 python-dotenv>=1.0
+requests>=2.31
+pytest>=8.0

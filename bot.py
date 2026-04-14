@@ -1,23 +1,19 @@
 """
 SG Birds search bot.
 
-Long-running Telethon process that supports two interaction modes:
-
-1. DM chat — open a private chat with the bot and type a species or location.
-   The bot replies with the most recent matching sightings. Use /start, /help.
-
-2. Inline query — type `@SGBirdsBot fairy pitta` in any chat. Results appear
-   in a private popup only the asker sees; clicking a result posts it to the chat.
+Long-running Telethon process. DM the bot in private chat and send:
+  - A species or SG location as text → searches the local SQLite archive.
+  - A non-SG location as text → falls back to eBird (10 km, last 30 days).
+  - A shared Telegram location pin → eBird results at those coordinates.
 
 Setup:
   1. Create a bot via @BotFather, get a token
-  2. (Optional) Run /setinline in BotFather to enable inline mode
-  3. Add BOT_TOKEN=... to .env
+  2. Add BOT_TOKEN=... to .env
+  3. (Optional) Add EBIRD_API_KEY=... to .env for the non-SG fallback
   4. Run: python bot.py
 """
 
 import asyncio
-import html
 import json
 import os
 import re
@@ -29,9 +25,12 @@ from telethon.tl.types import (
     MessageEntityBlockquote,
     MessageEntityBold,
     MessageEntityTextUrl,
+    MessageMediaGeo,
+    MessageMediaGeoLive,
 )
 
 import db
+import ebird
 
 load_dotenv()
 
@@ -41,6 +40,10 @@ BOT_SESSION_PATH = os.path.join(PROJECT_DIR, "session", "sg_birds_bot")
 API_ID = int(os.environ["TELEGRAM_API_ID"])
 API_HASH = os.environ["TELEGRAM_API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+EBIRD_API_KEY = os.environ.get("EBIRD_API_KEY")
+
+EBIRD_DIST_KM = 10
+EBIRD_BACK_DAYS = 30
 
 # Optional: source group ID, used to build deep links back to original messages.
 # Read from group_config.json if available so links work in the inline results.
@@ -100,103 +103,32 @@ def deep_link(source_msg_id):
     return f"https://t.me/c/{gid_str}/{source_msg_id}"
 
 
-def format_full_message(row):
-    """The message body that gets posted to chat if the user clicks a result."""
-    parts = [f"<b>{html.escape(row['species'])}</b>"]
-    parts.append(row["date"])
-    if row["location"]:
-        loc = html.escape(row["location"])
-        parts.append(f'📍 <a href="{maps_link(row["location"])}">{loc}</a>')
-    if row["observer"]:
-        parts.append(f"👤 {row['observer']}")
-    if row["notes"]:
-        parts.append(row["notes"])
-    link = deep_link(row["source_msg_id"])
-    if link:
-        parts.append(f'<a href="{link}">View original message</a>')
-    return "\n".join(parts)
-
-
-def format_description(row):
-    """Short preview shown in the inline results popup."""
-    bits = []
-    if row["location"]:
-        bits.append(row["location"])
-    if row["observer"]:
-        bits.append(row["observer"])
-    if row["notes"]:
-        bits.append(row["notes"][:80])
-    return " · ".join(bits) or "no details"
-
-
 bot = TelegramClient(BOT_SESSION_PATH, API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-
-
-@bot.on(events.InlineQuery)
-async def handler(event):
-    query = event.text.strip()
-    builder = event.builder
-
-    if not query:
-        # Empty query — show a hint
-        await event.answer(
-            [builder.article(
-                title="Type a species or location",
-                description="e.g. 'fairy pitta' or 'sungei buloh'",
-                text="Search SG Birds sightings via @SGBirdsBot",
-            )],
-            cache_time=1,
-            private=True,
-        )
-        return
-
-    rows = db.search(query, limit=20, acronym_map=ACRONYM_MAP)
-    if not rows:
-        await event.answer(
-            [builder.article(
-                title=f"No sightings for '{query}'",
-                description="Try a different species or location",
-                text=f"No SG Birds sightings found for '{query}'",
-            )],
-            cache_time=10,
-            private=True,
-        )
-        return
-
-    results = []
-    for row in rows:
-        title = f"{row['species']} — {row['date']}"
-        results.append(
-            builder.article(
-                title=title,
-                description=format_description(row),
-                text=format_full_message(row),
-                parse_mode="html",
-            )
-        )
-
-    await event.answer(results, cache_time=30, private=True)
 
 
 WELCOME = (
     "👋 Hi! I'm the SG Birds search bot.\n\n"
-    "Just send me a species or location and I'll show recent sightings from the "
-    "SG Birds Telegram group (last 90 days).\n\n"
-    "Examples:\n"
-    "  • <code>fairy pitta</code>\n"
-    "  • <code>sungei buloh</code>\n"
-    "  • <code>oriental darter</code>\n\n"
+    "Send me:\n"
+    "  • A species or SG location — I'll search the SG Birds group archive (last 90 days).\n"
+    "  • A non-SG place name (e.g. <code>foster city</code>, <code>taipei</code>) — "
+    "I'll fetch recent eBird sightings within 10 km, last 30 days.\n"
+    "  • A 📍 location pin (attach → location) — same eBird lookup at your coordinates.\n\n"
     "Commands: /help"
 )
 
 HELP = (
     "<b>How to use</b>\n\n"
-    "Send any species name or location and I'll search the archive.\n\n"
-    "Search is fuzzy — partial words work (e.g. <code>pitta</code> matches Fairy Pitta, "
-    "Mangrove Pitta, Blue-winged Pitta).\n\n"
-    "I keep a rolling 90-day window of sightings extracted from the SG Birds group.\n\n"
-    "Each result includes a link back to the original group message (only works "
-    "if you're a member of the group)."
+    "<b>Text queries</b>\n"
+    "• Species (<code>fairy pitta</code>) or SG location (<code>sungei buloh</code>) "
+    "→ searches the SG Birds group archive.\n"
+    "• Non-SG place (<code>foster city</code>, <code>taipei</code>) "
+    "→ eBird, 10 km radius, last 30 days.\n"
+    "Search is fuzzy — partial words work.\n\n"
+    "<b>Location pin</b>\n"
+    "Tap the 📎 attach button → Location → Send My Current Location. "
+    "I'll fetch eBird sightings near those coordinates.\n\n"
+    "The SG archive covers a rolling 90-day window. Each SG result links back to "
+    "the original group message (only works if you're a member of the group)."
 )
 
 
@@ -269,6 +201,85 @@ def _append_one(builder, row):
     if link:
         builder.add("\n   ")
         builder.add_link("View original", link)
+
+
+def _coord_maps_link(lat, lng):
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+
+
+def _append_ebird_row(builder, row):
+    builder.add("• ")
+    builder.add_bold(row["species"])
+    builder.add(f" — {row['date']}")
+    count = row.get("_count")
+    if count and count > 1:
+        builder.add(f" ({count} sightings in last {EBIRD_BACK_DAYS} days)")
+    howmany = row.get("count")
+    if howmany:
+        builder.add(f" [x{howmany}]")
+    if row.get("location") and row.get("lat") is not None and row.get("lng") is not None:
+        builder.add("\n   📍 ")
+        builder.add_link(row["location"], _coord_maps_link(row["lat"], row["lng"]))
+    if row.get("notable"):
+        builder.add("\n   ⭐ notable")
+
+
+def build_ebird_messages(header_place, rows, visible=5):
+    """Build reply messages for eBird results. Mirrors build_chat_messages."""
+    if not rows:
+        b = MessageBuilder()
+        b.add("No eBird sightings within ")
+        b.add(f"{EBIRD_DIST_KM} km of ")
+        b.add_bold(header_place)
+        b.add(f" in the last {EBIRD_BACK_DAYS} days.")
+        return [_finalize(b)]
+
+    messages = []
+    n = len(rows)
+    b = MessageBuilder()
+    b.add_bold(f"{n} species near {header_place}")
+    b.add(f"\n(eBird · {EBIRD_DIST_KM} km · last {EBIRD_BACK_DAYS} days)\n\n")
+    for row in rows[:visible]:
+        _append_ebird_row(b, row)
+        b.add("\n\n")
+
+    if n > visible:
+        b.add(f"Tap to expand {n - visible} more:\n")
+        next_idx = _pack_ebird_into_blockquote(b, rows, visible)
+    else:
+        next_idx = n
+    messages.append(_finalize(b))
+
+    while next_idx < n:
+        b = MessageBuilder()
+        b.add_bold("More results (cont'd):")
+        b.add("\n")
+        prev_idx = next_idx
+        next_idx = _pack_ebird_into_blockquote(b, rows, next_idx)
+        if next_idx == prev_idx:
+            next_idx += 1
+        messages.append(_finalize(b))
+
+    return messages
+
+
+def _pack_ebird_into_blockquote(builder, rows, start_idx):
+    if start_idx >= len(rows):
+        return start_idx
+    bq_start = builder.offset
+    idx = start_idx
+    while idx < len(rows):
+        snap = builder.snapshot()
+        _append_ebird_row(builder, rows[idx])
+        if idx < len(rows) - 1:
+            builder.add("\n\n")
+        if len(builder.text) > MAX_MSG_CHARS:
+            builder.restore(snap)
+            break
+        idx += 1
+    if builder.offset > bq_start:
+        builder.add_blockquote_from(bq_start, collapsed=True)
+    return idx
 
 
 def maybe_dedupe_by_species(rows, threshold=5):
@@ -406,21 +417,64 @@ async def on_help(event):
     await event.reply(HELP, parse_mode="html")
 
 
+async def _reply_messages(event, messages):
+    for msg_text, entities in messages:
+        await event.reply(msg_text, formatting_entities=entities, link_preview=False)
+
+
+async def _handle_ebird_at(event, lat, lng, place_label):
+    """Fetch eBird results at (lat, lng) and reply. place_label is shown in the header."""
+    if not EBIRD_API_KEY:
+        await event.reply(
+            "eBird lookups aren't configured on this bot. Set EBIRD_API_KEY in .env to enable them.",
+            link_preview=False,
+        )
+        return
+    rows = await asyncio.to_thread(
+        ebird.recent_near, lat, lng, EBIRD_API_KEY, EBIRD_DIST_KM, EBIRD_BACK_DAYS
+    )
+    if rows is None:
+        await event.reply("eBird lookups aren't configured. Set EBIRD_API_KEY in .env.")
+        return
+    grouped = ebird.group_by_species(rows)
+    messages = build_ebird_messages(place_label, grouped, visible=5)
+    await _reply_messages(event, messages)
+
+
 @bot.on(events.NewMessage)
 async def on_message(event):
     # Only respond in private (DM) chats
     if not event.is_private:
         return
+
+    # Shared location pin → eBird at those coordinates
+    media = event.message.media if event.message else None
+    if isinstance(media, (MessageMediaGeo, MessageMediaGeoLive)):
+        geo = media.geo
+        lat = float(geo.lat)
+        lng = float(geo.long)
+        place = await asyncio.to_thread(ebird.reverse_geocode, lat, lng) or f"{lat:.4f},{lng:.4f}"
+        await _handle_ebird_at(event, lat, lng, place)
+        return
+
     text = (event.raw_text or "").strip()
     # Skip empty messages and commands (handled separately)
     if not text or text.startswith("/"):
         return
 
+    # Text query: geocode first. If it resolves outside SG, route to eBird.
+    geo_result = await asyncio.to_thread(ebird.geocode, text)
+    if geo_result is not None:
+        lat, lng, display_name = geo_result
+        if not ebird.is_in_sg(lat, lng):
+            await _handle_ebird_at(event, lat, lng, display_name)
+            return
+
+    # Default path: local SG archive search
     rows = db.search(text, limit=100, acronym_map=ACRONYM_MAP)
     rows = maybe_dedupe_by_species(rows)
     messages = build_chat_messages(text, rows, visible=5)
-    for msg_text, entities in messages:
-        await event.reply(msg_text, formatting_entities=entities, link_preview=False)
+    await _reply_messages(event, messages)
 
 
 HEALTH_INTERVAL = 120  # seconds between get_me() pings
@@ -445,7 +499,7 @@ async def _health_loop():
 async def _run():
     print("SG Birds bot starting...", flush=True)
     print(f"DB: {db.DEFAULT_DB_PATH} ({db.count()} sightings)", flush=True)
-    print("Modes: DM chat + inline queries", flush=True)
+    print(f"Modes: DM text + GPS pins · eBird={'on' if EBIRD_API_KEY else 'off'}", flush=True)
     asyncio.create_task(_health_loop())
     await bot.run_until_disconnected()
     print("Bot disconnected — exiting for respawn", flush=True)
