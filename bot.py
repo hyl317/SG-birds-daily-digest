@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import urllib.parse
 
 import secrets
@@ -47,6 +48,22 @@ EBIRD_API_KEY = os.environ.get("EBIRD_API_KEY")
 
 EBIRD_DIST_KM = 10
 EBIRD_BACK_DAYS = 30
+
+
+def _git_sha():
+    """Short git SHA of the running checkout, used by /ping for deploy verification."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=PROJECT_DIR,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+GIT_SHA = _git_sha()
 
 # Pending geocode disambiguation choices. Keyed by a short random token that
 # we stuff into inline button callback_data (which is capped at 64 bytes).
@@ -431,6 +448,15 @@ async def on_help(event):
     if not event.is_private:
         return
     await event.reply(HELP, parse_mode="html")
+
+
+@bot.on(events.NewMessage(pattern=r"^/ping"))
+async def on_ping(event):
+    """Smoke-test endpoint used by the ship-bot deploy script. Replies with the
+    running commit SHA so the deploy can verify the new code is actually live."""
+    if not event.is_private:
+        return
+    await event.reply(f"pong (commit: {GIT_SHA})")
 
 
 async def _reply_messages(event, messages, buttons=None):
