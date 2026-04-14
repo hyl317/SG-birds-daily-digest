@@ -230,6 +230,22 @@ def test_geocode_candidates_http_error_returns_empty():
         assert ebird.geocode_candidates("foster city") == ()
 
 
+def test_geocode_candidates_normalizes_us_to_uk_spelling():
+    # OSM uses British spelling; Photon's fuzzy matcher does NOT treat
+    # "center" and "centre" as synonyms. Verify the query gets normalized
+    # before hitting the wire.
+    payload = _photon_payload(
+        _photon_feature("Rainforest Discovery Centre", 5.8765, 117.9445,
+                        "tourism", "attraction", country="Malaysia", state="Sabah"),
+    )
+    with patch("ebird.requests.get", return_value=_mock_response(payload)) as mock_get:
+        result = ebird.geocode_candidates("rainforest discovery center")
+    assert len(result) == 1
+    # Confirm we actually sent the British spelling to Photon
+    _, kwargs = mock_get.call_args
+    assert kwargs["params"]["q"] == "rainforest discovery centre"
+
+
 def test_geocode_candidates_skips_feature_missing_coords():
     payload = _photon_payload(
         # Coordinates missing — should be skipped, not crash

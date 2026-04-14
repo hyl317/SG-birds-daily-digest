@@ -69,6 +69,33 @@ def _photon_allowed(props):
     return True
 
 
+# Common US→UK spelling normalizations. OSM is dominantly British, and
+# Photon's fuzzy matcher does NOT treat "center" and "centre" as synonyms,
+# so an American-spelling query for "rainforest discovery center" returns
+# zero despite "Rainforest Discovery Centre" being in OSM. Rewrite
+# word-by-word before sending to Photon.
+_US_UK_MAP = {
+    "center": "centre", "centers": "centres",
+    "harbor": "harbour", "harbors": "harbours",
+    "theater": "theatre", "theaters": "theatres",
+    "color": "colour", "colors": "colours",
+    "favorite": "favourite", "favorites": "favourites",
+}
+
+
+def _normalize_spelling(query):
+    """Replace US spellings with UK equivalents token-wise, preserving case."""
+    def sub(match):
+        w = match.group(0)
+        uk = _US_UK_MAP.get(w.lower())
+        if not uk:
+            return w
+        # Preserve title case; lowercase everything else (OSM is lowercase-ish).
+        return uk.capitalize() if w[:1].isupper() else uk
+    import re as _re
+    return _re.sub(r"[A-Za-z]+", sub, query)
+
+
 @functools.lru_cache(maxsize=256)
 def geocode_candidates(query, limit=5):
     """
@@ -82,10 +109,11 @@ def geocode_candidates(query, limit=5):
     Returns an empty tuple on HTTP failure, empty results, or if no
     candidate passes the filter.
     """
+    normalized = _normalize_spelling(query)
     try:
         r = requests.get(
             PHOTON_BASE,
-            params={"q": query, "limit": 10},
+            params={"q": normalized, "limit": 10},
             headers={"User-Agent": USER_AGENT},
             timeout=10,
         )
