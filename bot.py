@@ -159,6 +159,8 @@ WELCOME = (
     "  • A species or SG location — I'll search the SG Birds group archive (last 90 days).\n"
     "  • A non-SG place name (e.g. <code>foster city</code>, <code>taipei</code>) — "
     "I'll fetch recent eBird sightings within 10 km, last 30 days.\n"
+    "  • <b>Species near place</b> (e.g. <code>great horned owl near foster city</code>) — "
+    "eBird records of that species at that location.\n"
     "  • A 📍 location pin (attach → location) — same eBird lookup at your coordinates.\n\n"
     "Commands: /help"
 )
@@ -170,6 +172,9 @@ HELP = (
     "→ searches the SG Birds group archive.\n"
     "• Non-SG place (<code>foster city</code>, <code>taipei</code>) "
     "→ eBird, 10 km radius, last 30 days.\n"
+    "• <b>Species near place</b> (<code>great horned owl near foster city</code>, "
+    "<code>fairy pitta in taipei</code>) → eBird records of that species, scoped to that location. "
+    "Works with <i>near</i>, <i>in</i>, <i>at</i>, or <i>around</i>.\n"
     "Search is fuzzy — partial words work.\n\n"
     "<b>Location pin</b>\n"
     "Tap the 📎 attach button → Location → Send My Current Location. "
@@ -271,12 +276,18 @@ def _append_ebird_row(builder, row, back_days):
         builder.add("\n   ⭐ notable")
 
 
-def build_ebird_messages(header_place, rows, dist_km, back_days, visible=5):
-    """Build reply messages for eBird results. Mirrors build_chat_messages."""
+def build_ebird_messages(header_place, rows, dist_km, back_days, visible=5, species_name=None):
+    """Build reply messages for eBird results. Mirrors build_chat_messages.
+    If species_name is set, renders a species-scoped header; otherwise the
+    default 'N species near X' header for multi-species location queries."""
     if not rows:
         b = MessageBuilder()
-        b.add("No eBird sightings within ")
-        b.add(f"{dist_km} km of ")
+        b.add("No eBird sightings ")
+        if species_name:
+            b.add("of ")
+            b.add_bold(species_name)
+            b.add(" ")
+        b.add(f"within {dist_km} km of ")
         b.add_bold(header_place)
         b.add(f" in the last {back_days} days.")
         return [_finalize(b)]
@@ -284,7 +295,10 @@ def build_ebird_messages(header_place, rows, dist_km, back_days, visible=5):
     messages = []
     n = len(rows)
     b = MessageBuilder()
-    b.add_bold(f"{n} species near {header_place}")
+    if species_name:
+        b.add_bold(f"{n} recent sighting{'s' if n != 1 else ''} of {species_name} near {header_place}")
+    else:
+        b.add_bold(f"{n} species near {header_place}")
     b.add(f"\n(eBird · {dist_km} km · last {back_days} days)\n\n")
     for row in rows[:visible]:
         _append_ebird_row(b, row, back_days)
@@ -483,19 +497,27 @@ async def _reply_messages(event, messages, buttons=None):
         await event.reply(msg_text, **kwargs)
 
 
-def _stash_geo_choices(candidates):
-    """Store a candidate list and return a short token for callback data."""
+def _stash_geo_choices(candidates, species_code=None, species_name=None):
+    """Store a candidate list and return a short token for callback data.
+    species_code/species_name are carried through so a species+location query
+    still hits the species-scoped eBird endpoint after disambiguation."""
     token = secrets.token_hex(4)  # 8 hex chars
-    PENDING_GEO_CHOICES[token] = list(candidates)
+    PENDING_GEO_CHOICES[token] = {
+        "candidates": list(candidates),
+        "species_code": species_code,
+        "species_name": species_name,
+    }
     PENDING_GEO_CHOICES.move_to_end(token)
     while len(PENDING_GEO_CHOICES) > PENDING_GEO_MAX:
         PENDING_GEO_CHOICES.popitem(last=False)
     return token
 
 
-def _stash_ebird_query(lat, lng, place_label, dist_km, back_days):
+def _stash_ebird_query(lat, lng, place_label, dist_km, back_days, species_code=None, species_name=None):
     """Store coordinates + pending refine state. pending_* start equal to the active
-    values and are mutated as the user taps radius/days buttons; 'Run' commits them."""
+    values and are mutated as the user taps radius/days buttons; 'Run' commits them.
+    species_code/species_name are optional: when set, Run calls the species-scoped
+    eBird endpoint and headers render 'sightings of X near Y'."""
     token = secrets.token_hex(4)
     PENDING_EBIRD_QUERIES[token] = {
         "lat": lat,
@@ -503,6 +525,8 @@ def _stash_ebird_query(lat, lng, place_label, dist_km, back_days):
         "place": place_label,
         "pending_dist": dist_km,
         "pending_days": back_days,
+        "species_code": species_code,
+        "species_name": species_name,
     }
     PENDING_EBIRD_QUERIES.move_to_end(token)
     while len(PENDING_EBIRD_QUERIES) > PENDING_EBIRD_MAX:
@@ -543,9 +567,9 @@ def _short_label(display_name, max_len=40):
     return compact
 
 
-async def _send_geo_picker(event, candidates):
+async def _send_geo_picker(event, candidates, species_code=None, species_name=None):
     """Reply with an inline keyboard asking the user to pick among candidates."""
-    token = _stash_geo_choices(candidates)
+    token = _stash_geo_choices(candidates, species_code=species_code, species_name=species_name)
     buttons = [
         [Button.inline(_short_label(name), data=f"geo:{token}:{i}".encode())]
         for i, (_, _, name) in enumerate(candidates)
@@ -557,11 +581,12 @@ async def _send_geo_picker(event, candidates):
     )
 
 
-async def _send_ebird_picker(event, lat, lng, place_label):
+async def _send_ebird_picker(event, lat, lng, place_label, species_code=None, species_name=None):
     """
     Post a picker message BEFORE running any eBird query. The user stages their
     preferred radius/days with the buttons and hits 🔍 Run to actually search.
-    Defaults to EBIRD_DIST_KM / EBIRD_BACK_DAYS.
+    Defaults to EBIRD_DIST_KM / EBIRD_BACK_DAYS. If species_code is set, Run
+    will hit the species-scoped eBird endpoint instead of the multi-species one.
     """
     if not EBIRD_API_KEY:
         await event.reply(
@@ -569,10 +594,14 @@ async def _send_ebird_picker(event, lat, lng, place_label):
             link_preview=False,
         )
         return
-    token = _stash_ebird_query(lat, lng, place_label, EBIRD_DIST_KM, EBIRD_BACK_DAYS)
+    token = _stash_ebird_query(
+        lat, lng, place_label, EBIRD_DIST_KM, EBIRD_BACK_DAYS,
+        species_code=species_code, species_name=species_name,
+    )
     buttons = _build_refine_keyboard(token, EBIRD_DIST_KM, EBIRD_BACK_DAYS)
+    header = f"🦉 **{species_name}** near **{place_label}**" if species_name else f"📍 **{place_label}**"
     await event.reply(
-        f"📍 **{place_label}**\n\n"
+        f"{header}\n\n"
         f"Pick a radius and a timeframe, then tap 🔍 Run.\n"
         f"(defaults: {EBIRD_DIST_KM} km · last {EBIRD_BACK_DAYS} days)",
         buttons=buttons,
@@ -580,9 +609,12 @@ async def _send_ebird_picker(event, lat, lng, place_label):
     )
 
 
-async def _handle_ebird_at(event, lat, lng, place_label, dist_km=None, back_days=None):
+async def _handle_ebird_at(event, lat, lng, place_label, dist_km=None, back_days=None,
+                           species_code=None, species_name=None):
     """Fetch eBird results at (lat, lng) and reply. place_label is shown in the header.
-    dist_km/back_days default to the global preset; the refine keyboard passes overrides."""
+    dist_km/back_days default to the global preset; the refine keyboard passes overrides.
+    If species_code is set, hits /obs/geo/recent/{speciesCode} and groups by location
+    instead of by species."""
     if not EBIRD_API_KEY:
         await event.reply(
             "eBird lookups aren't configured on this bot. Set EBIRD_API_KEY in .env to enable them.",
@@ -593,15 +625,25 @@ async def _handle_ebird_at(event, lat, lng, place_label, dist_km=None, back_days
         dist_km = EBIRD_DIST_KM
     if back_days is None:
         back_days = EBIRD_BACK_DAYS
-    rows = await asyncio.to_thread(
-        ebird.recent_near, lat, lng, EBIRD_API_KEY, dist_km, back_days
-    )
+    if species_code:
+        rows = await asyncio.to_thread(
+            ebird.recent_species_near, species_code, lat, lng, EBIRD_API_KEY, dist_km, back_days
+        )
+    else:
+        rows = await asyncio.to_thread(
+            ebird.recent_near, lat, lng, EBIRD_API_KEY, dist_km, back_days
+        )
     if rows is None:
         await event.reply("eBird lookups aren't configured. Set EBIRD_API_KEY in .env.")
         return
-    grouped = ebird.group_by_species(rows)
-    messages = build_ebird_messages(place_label, grouped, dist_km, back_days, visible=5)
-    token = _stash_ebird_query(lat, lng, place_label, dist_km, back_days)
+    grouped = ebird.group_by_location(rows) if species_code else ebird.group_by_species(rows)
+    messages = build_ebird_messages(
+        place_label, grouped, dist_km, back_days, visible=5, species_name=species_name,
+    )
+    token = _stash_ebird_query(
+        lat, lng, place_label, dist_km, back_days,
+        species_code=species_code, species_name=species_name,
+    )
     buttons = _build_refine_keyboard(token, dist_km, back_days)
     await _reply_messages(event, messages, buttons=buttons)
 
@@ -626,6 +668,27 @@ async def on_message(event):
     # Skip empty messages and commands (handled separately)
     if not text or text.startswith("/"):
         return
+
+    # "SPECIES near LOCATION" queries (e.g. "great horned owl near foster city")
+    # take the fast path straight to eBird's species-scoped endpoint. The
+    # classifier would otherwise route this as "species" (all tokens bird-y)
+    # and never see the location.
+    parsed = classify.parse_species_location(text)
+    if parsed:
+        species_code, species_name, loc_text = parsed
+        candidates = await asyncio.to_thread(ebird.geocode_candidates, loc_text)
+        if candidates:
+            non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])] or list(candidates)
+            if len(non_sg) == 1:
+                lat, lng, display_name = non_sg[0]
+                await _send_ebird_picker(
+                    event, lat, lng, display_name,
+                    species_code=species_code, species_name=species_name,
+                )
+            else:
+                await _send_geo_picker(event, non_sg[:5], species_code=species_code, species_name=species_name)
+            return
+        # Geocoder came up empty — fall through to the normal classifier path.
 
     kind = classify.classify(text)
 
@@ -692,8 +755,9 @@ async def on_geo_choice(event):
         await event.answer("Invalid selection.", alert=True)
         return
 
-    choices = PENDING_GEO_CHOICES.pop(token, None)
-    if not choices or idx < 0 or idx >= len(choices):
+    stash = PENDING_GEO_CHOICES.pop(token, None)
+    cands = stash["candidates"] if stash else None
+    if not cands or idx < 0 or idx >= len(cands):
         await event.answer("That selection has expired — please search again.", alert=True)
         try:
             await event.edit("(selection expired)", buttons=None)
@@ -701,13 +765,17 @@ async def on_geo_choice(event):
             pass
         return
 
-    lat, lng, display_name = choices[idx]
+    lat, lng, display_name = cands[idx]
     await event.answer()  # dismiss the loading spinner
     try:
         await event.edit(f"Selected: **{_short_label(display_name)}**", buttons=None)
     except Exception:
         pass
-    await _send_ebird_picker(event, lat, lng, display_name)
+    await _send_ebird_picker(
+        event, lat, lng, display_name,
+        species_code=stash.get("species_code"),
+        species_name=stash.get("species_name"),
+    )
 
 
 @bot.on(events.CallbackQuery(pattern=rb"^refine:"))
@@ -758,7 +826,9 @@ async def on_refine(event):
         back_days = stashed["pending_days"]
         await event.answer(f"Searching {dist_km} km · {back_days} d…")
         await _handle_ebird_at(
-            event, lat, lng, place_label, dist_km=dist_km, back_days=back_days
+            event, lat, lng, place_label, dist_km=dist_km, back_days=back_days,
+            species_code=stashed.get("species_code"),
+            species_name=stashed.get("species_name"),
         )
         return
 

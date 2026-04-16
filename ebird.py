@@ -196,6 +196,64 @@ def recent_near(lat, lng, api_key, dist_km=10, back_days=30):
     return rows
 
 
+def recent_species_near(species_code, lat, lng, api_key, dist_km=25, back_days=30):
+    """
+    Fetch recent sightings of a specific species near a point via
+    /data/obs/geo/recent/{speciesCode}. Same row shape as recent_near.
+    Returns None if api_key is missing, [] on empty or error.
+    """
+    if not api_key:
+        return None
+    try:
+        r = requests.get(
+            f"{EBIRD_BASE}/data/obs/geo/recent/{species_code}",
+            params={"lat": lat, "lng": lng, "dist": dist_km, "back": back_days},
+            headers={"X-eBirdApiToken": api_key},
+            timeout=15,
+        )
+        r.raise_for_status()
+        raw = r.json()
+    except Exception as e:
+        print(f"eBird species request failed: {e!r}", flush=True)
+        return []
+
+    rows = []
+    for obs in raw:
+        rows.append({
+            "species": obs.get("comName") or "Unknown",
+            "sci_name": obs.get("sciName"),
+            "location": obs.get("locName"),
+            "lat": obs.get("lat"),
+            "lng": obs.get("lng"),
+            "date": obs.get("obsDt", "").split(" ")[0],
+            "count": obs.get("howMany"),
+            "notable": obs.get("obsReviewed", False),
+        })
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return rows
+
+
+def group_by_location(rows):
+    """
+    Collapse to one row per locName (keeping the most recent), annotating
+    each with `_count` = total sightings at that location. Used for
+    species-scoped queries where every row is the same species — grouping
+    by location is the meaningful axis.
+    """
+    by_loc = {}
+    counts = {}
+    for r in rows:
+        loc = r.get("location") or ""
+        counts[loc] = counts.get(loc, 0) + 1
+        if loc not in by_loc:
+            by_loc[loc] = dict(r)
+    out = []
+    for loc, r in by_loc.items():
+        r["_count"] = counts[loc]
+        out.append(r)
+    return out
+
+
 def group_by_species(rows):
     """
     Collapse to one row per species (keeping the most recent), annotating

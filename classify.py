@@ -28,6 +28,37 @@ import taxonomy
 
 _STOPWORDS = {"and", "or", "the", "of", "a", "an", "sp", "spp", "cf"}
 
+# Keyword separators for "SPECIES <sep> LOCATION" queries. First match wins,
+# so "fairy pitta at kaeng krachan near bangkok" splits on " at " and the
+# rest is treated as the location string.
+_SPLIT_RE = re.compile(r"\s+(?:near|in|at|around)\s+", re.I)
+
+
+def parse_species_location(text: str):
+    """
+    Try to parse a "SPECIES <near|in|at|around> LOCATION" query.
+
+    Returns (species_code, species_name, location_string) if the LHS is
+    an exact match for a species comName / sciName / alpha code, else
+    None. Single-word generic queries like "eagle" deliberately don't
+    match — the LHS must be a full taxonomy entry so we know which
+    speciesCode to use. species_name is the user-typed LHS (title-cased
+    for display).
+    """
+    m = _SPLIT_RE.search(text)
+    if not m:
+        return None
+    lhs = text[: m.start()].strip()
+    rhs = text[m.end():].strip()
+    if not lhs or not rhs:
+        return None
+    lhs_norm = re.sub(r"[^\w\s]", " ", lhs.lower()).strip()
+    lhs_norm = re.sub(r"\s+", " ", lhs_norm)
+    code = taxonomy.SPECIES_CODES.get(lhs_norm)
+    if not code:
+        return None
+    return code, lhs.title(), rhs
+
 
 def classify(text: str) -> str:
     """

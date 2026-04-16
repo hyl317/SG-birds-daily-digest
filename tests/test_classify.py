@@ -22,9 +22,17 @@ _FULL_NAMES = {
     "philippine eagle", "pithecophaga jefferyi",
     "sulawesi hornbill", "rhabdotorrhinus exarhatus",
     "common ostrich", "struthio camelus",
+    "great horned owl", "bubo virginianus",
 }
 
-_ALPHA_CODES = {"coos", "shik", "fapi"}
+_ALPHA_CODES = {"coos", "shik", "fapi", "ghow"}
+
+_SPECIES_CODES = {
+    "fairy pitta": "faipit1", "pitta nympha": "faipit1", "fapi": "faipit1",
+    "shikra": "shikra1", "accipiter badius": "shikra1", "shik": "shikra1",
+    "great horned owl": "grhowl", "bubo virginianus": "grhowl", "ghow": "grhowl",
+    "philippine eagle": "phieag1",
+}
 
 # Family tokens + common-word tokens. These are the words that real
 # taxonomy extraction would surface as "bird-y" — e.g. "eagle" appears
@@ -48,10 +56,12 @@ def fixture_taxonomy():
     taxonomy.FULL_NAMES.clear(); taxonomy.FULL_NAMES.update(_FULL_NAMES)
     taxonomy.ALPHA_CODES.clear(); taxonomy.ALPHA_CODES.update(_ALPHA_CODES)
     taxonomy.BIRD_LEXICON.clear(); taxonomy.BIRD_LEXICON.update(_BIRD_LEXICON)
+    taxonomy.SPECIES_CODES.clear(); taxonomy.SPECIES_CODES.update(_SPECIES_CODES)
     yield
     taxonomy.FULL_NAMES.clear()
     taxonomy.ALPHA_CODES.clear()
     taxonomy.BIRD_LEXICON.clear()
+    taxonomy.SPECIES_CODES.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -181,3 +191,48 @@ def test_punctuation_stripped():
 def test_stopwords_ignored():
     # "sp" is a stopword; "shikra" alone is a full species name.
     assert classify.classify("sp shikra") == "species"
+
+
+# ---------------------------------------------------------------------------
+# parse_species_location — the "SPECIES near LOCATION" parser
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("q,exp_code,exp_loc", [
+    ("great horned owl near foster city, CA", "grhowl", "foster city, CA"),
+    ("Great Horned Owl near Foster City", "grhowl", "Foster City"),
+    ("fairy pitta in taipei", "faipit1", "taipei"),
+    ("shikra at kaeng krachan", "shikra1", "kaeng krachan"),
+    ("fairy pitta around sabah", "faipit1", "sabah"),
+    ("bubo virginianus near yellowstone", "grhowl", "yellowstone"),
+    ("GHOW near boulder", "grhowl", "boulder"),
+])
+def test_parse_species_location_happy_path(q, exp_code, exp_loc):
+    result = classify.parse_species_location(q)
+    assert result is not None
+    code, name, loc = result
+    assert code == exp_code
+    assert loc == exp_loc
+    assert name  # non-empty display name
+
+
+def test_parse_species_location_first_separator_wins():
+    # "fairy pitta at kaeng krachan near bangkok" → splits on " at "
+    result = classify.parse_species_location("fairy pitta at kaeng krachan near bangkok")
+    assert result is not None
+    code, _, loc = result
+    assert code == "faipit1"
+    assert loc == "kaeng krachan near bangkok"
+
+
+@pytest.mark.parametrize("q", [
+    "fairy pitta",               # no separator
+    "foster city",               # no separator, no species
+    "eagle near foster city",    # "eagle" not a full species name
+    "chinese garden in town",    # LHS not a species
+    "near foster city",          # empty LHS
+    "fairy pitta in ",           # empty RHS after strip
+    "",                          # empty
+    "brown shrike near park",    # LHS not in fixture
+])
+def test_parse_species_location_no_match(q):
+    assert classify.parse_species_location(q) is None

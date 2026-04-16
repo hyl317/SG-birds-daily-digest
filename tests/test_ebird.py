@@ -339,6 +339,56 @@ def test_recent_near_empty_results():
         assert ebird.recent_near(1.3, 103.8, api_key="FAKE") == []
 
 
+def test_recent_species_near_no_api_key_returns_none():
+    assert ebird.recent_species_near("grhowl", 1.3, 103.8, api_key=None) is None
+
+
+def test_recent_species_near_happy_path():
+    payload = [
+        {
+            "comName": "Great Horned Owl", "sciName": "Bubo virginianus",
+            "locName": "Coyote Point", "lat": 37.59, "lng": -122.32,
+            "obsDt": "2026-04-12 18:30", "howMany": 1, "obsReviewed": False,
+        },
+        {
+            "comName": "Great Horned Owl", "sciName": "Bubo virginianus",
+            "locName": "Bay Trail", "lat": 37.56, "lng": -122.27,
+            "obsDt": "2026-04-14 19:00", "howMany": 2, "obsReviewed": True,
+        },
+    ]
+    with patch("ebird.requests.get", return_value=_mock_response(payload)) as mock_get:
+        rows = ebird.recent_species_near("grhowl", 37.56, -122.27,
+                                         api_key="FAKE", dist_km=25, back_days=14)
+    # Verify the right URL and params
+    args, kwargs = mock_get.call_args
+    assert "/data/obs/geo/recent/grhowl" in args[0]
+    assert kwargs["headers"]["X-eBirdApiToken"] == "FAKE"
+    assert kwargs["params"]["dist"] == 25
+    assert kwargs["params"]["back"] == 14
+    # Sort (date desc) — Bay Trail first
+    assert rows[0]["location"] == "Bay Trail"
+    assert rows[0]["date"] == "2026-04-14"
+    assert rows[1]["location"] == "Coyote Point"
+
+
+def test_recent_species_near_http_error_returns_empty():
+    with patch("ebird.requests.get", side_effect=requests.ConnectionError("boom")):
+        assert ebird.recent_species_near("grhowl", 1.3, 103.8, api_key="FAKE") == []
+
+
+def test_group_by_location_collapses_and_counts():
+    rows = [
+        {"species": "GHO", "location": "Coyote Point", "date": "2026-04-14"},
+        {"species": "GHO", "location": "Coyote Point", "date": "2026-04-10"},
+        {"species": "GHO", "location": "Bay Trail", "date": "2026-04-12"},
+    ]
+    grouped = ebird.group_by_location(rows)
+    by_loc = {r["location"]: r for r in grouped}
+    assert by_loc["Coyote Point"]["_count"] == 2
+    assert by_loc["Coyote Point"]["date"] == "2026-04-14"  # kept most recent
+    assert by_loc["Bay Trail"]["_count"] == 1
+
+
 def test_recent_near_handles_missing_fields():
     payload = [
         {"comName": "Mystery Bird", "obsDt": "2026-04-14"},  # minimal row

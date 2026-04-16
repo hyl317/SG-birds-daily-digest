@@ -11,6 +11,11 @@ once, then exposes three lookup sets used by classify.py:
                    ≥5 species common names ("eagle", "shrike", "ground").
                    Used by the classifier to spot bird-y words inside
                    multi-word queries.
+  - SPECIES_CODES: dict mapping lowercased common name / scientific name
+                   / alpha code → eBird speciesCode. Used by the
+                   "species near location" parser to resolve the species
+                   half into the code that eBird's species-scoped
+                   /obs/geo/recent/{speciesCode} endpoint requires.
 
 Cached at TAXONOMY_CACHE (per-host, gitignored). Re-fetched if the cache
 is older than REFRESH_DAYS. Downloaded via the already-present
@@ -46,6 +51,7 @@ _INCLUDE_CATEGORIES = {
 FULL_NAMES: set[str] = set()
 ALPHA_CODES: set[str] = set()
 BIRD_LEXICON: set[str] = set()
+SPECIES_CODES: dict[str, str] = {}
 
 
 def _fetch_taxonomy(api_key):
@@ -83,20 +89,29 @@ def _build_sets(tax):
     """Populate FULL_NAMES, ALPHA_CODES, BIRD_LEXICON from a parsed taxonomy."""
     full_names = set()
     alpha_codes = set()
+    species_codes = {}
     family_tokens = set()
     word_counts = Counter()
 
     for e in tax:
         if e.get("category") not in _INCLUDE_CATEGORIES:
             continue
+        code = e.get("speciesCode")
         cn = (e.get("comName") or "").strip().lower()
         sn = (e.get("sciName") or "").strip().lower()
         if cn:
             full_names.add(cn)
+            if code:
+                species_codes[cn] = code
         if sn:
             full_names.add(sn)
+            if code:
+                species_codes[sn] = code
         for c in (e.get("comNameCodes") or []) + (e.get("sciNameCodes") or []):
-            alpha_codes.add(c.lower())
+            cl = c.lower()
+            alpha_codes.add(cl)
+            if code:
+                species_codes.setdefault(cl, code)
         fam = (e.get("familyComName") or "").lower()
         for tok in re.findall(r"[a-z]+", fam):
             if tok not in _STOPWORDS and len(tok) >= 3:
@@ -115,6 +130,7 @@ def _build_sets(tax):
     FULL_NAMES.clear(); FULL_NAMES.update(full_names)
     ALPHA_CODES.clear(); ALPHA_CODES.update(alpha_codes)
     BIRD_LEXICON.clear(); BIRD_LEXICON.update(family_tokens | common_words)
+    SPECIES_CODES.clear(); SPECIES_CODES.update(species_codes)
 
 
 def load(api_key=None, force_refresh=False):
