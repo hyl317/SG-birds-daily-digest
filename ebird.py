@@ -14,6 +14,7 @@ to the local SQLite archive — see bot.on_message for routing.
 """
 
 import functools
+import re
 
 import requests
 
@@ -92,8 +93,7 @@ def _normalize_spelling(query):
             return w
         # Preserve title case; lowercase everything else (OSM is lowercase-ish).
         return uk.capitalize() if w[:1].isupper() else uk
-    import re as _re
-    return _re.sub(r"[A-Za-z]+", sub, query)
+    return re.sub(r"[A-Za-z]+", sub, query)
 
 
 @functools.lru_cache(maxsize=256)
@@ -180,6 +180,11 @@ def recent_near(lat, lng, api_key, dist_km=10, back_days=30):
         print(f"eBird request failed: {e!r}", flush=True)
         return []
 
+    return _parse_obs(raw)
+
+
+def _parse_obs(raw):
+    """Shared row-builder for recent_near / recent_species_near."""
     rows = []
     for obs in raw:
         rows.append({
@@ -188,7 +193,7 @@ def recent_near(lat, lng, api_key, dist_km=10, back_days=30):
             "location": obs.get("locName"),
             "lat": obs.get("lat"),
             "lng": obs.get("lng"),
-            "date": obs.get("obsDt", "").split(" ")[0],  # strip time component
+            "date": obs.get("obsDt", "").split(" ")[0],
             "count": obs.get("howMany"),
             "notable": obs.get("obsReviewed", False),
         })
@@ -217,20 +222,7 @@ def recent_species_near(species_code, lat, lng, api_key, dist_km=25, back_days=3
         print(f"eBird species request failed: {e!r}", flush=True)
         return []
 
-    rows = []
-    for obs in raw:
-        rows.append({
-            "species": obs.get("comName") or "Unknown",
-            "sci_name": obs.get("sciName"),
-            "location": obs.get("locName"),
-            "lat": obs.get("lat"),
-            "lng": obs.get("lng"),
-            "date": obs.get("obsDt", "").split(" ")[0],
-            "count": obs.get("howMany"),
-            "notable": obs.get("obsReviewed", False),
-        })
-    rows.sort(key=lambda r: r["date"], reverse=True)
-    return rows
+    return _parse_obs(raw)
 
 
 def group_by_location(rows):

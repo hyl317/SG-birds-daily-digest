@@ -438,11 +438,24 @@ async def send_telegram(client, subject, window, body, send_to=None):
     else:
         recipient = await client.get_entity(send_to)
     message = f"<b>{subject}</b>\n{window}\n\n{body}"
-    # Telegram has a 4096-char limit per message; split if needed
+    # Telegram has a 4096-char limit per message; split on paragraph
+    # boundaries so we never break mid-HTML-tag.
     if len(message) <= 4096:
         await client.send_message(recipient, message, parse_mode="html")
     else:
-        chunks = [message[i:i + 4096] for i in range(0, len(message), 4096)]
+        paragraphs = message.split("\n\n")
+        chunks = []
+        current = ""
+        for para in paragraphs:
+            candidate = current + ("\n\n" if current else "") + para
+            if len(candidate) > 4000:
+                if current:
+                    chunks.append(current)
+                current = para
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
         for chunk in chunks:
             await client.send_message(recipient, chunk, parse_mode="html")
 

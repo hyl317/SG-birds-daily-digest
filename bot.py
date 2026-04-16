@@ -343,31 +343,6 @@ def _pack_ebird_into_blockquote(builder, rows, start_idx, back_days):
     return idx
 
 
-def maybe_dedupe_by_species(rows, threshold=5):
-    """
-    If results contain many distinct species, treat as a location-style search and
-    collapse to one row per species (the most recent sighting), with a sighting count.
-    Otherwise return rows unchanged.
-    """
-    distinct = {r["species"] for r in rows}
-    if len(distinct) <= threshold:
-        return rows
-
-    by_species = {}  # preserves insertion order = date-desc order
-    counts = {}
-    for r in rows:
-        sp = r["species"]
-        counts[sp] = counts.get(sp, 0) + 1
-        if sp not in by_species:
-            by_species[sp] = dict(r)
-
-    deduped = []
-    for sp, r in by_species.items():
-        r["_count"] = counts[sp]
-        deduped.append(r)
-    return deduped
-
-
 MAX_MSG_CHARS = 3800  # Telegram limit is 4096; leave headroom for safety
 
 
@@ -669,69 +644,70 @@ async def on_message(event):
     if not text or text.startswith("/"):
         return
 
-    # "SPECIES near LOCATION" queries (e.g. "great horned owl near foster city")
-    # take the fast path straight to eBird's species-scoped endpoint. The
-    # classifier would otherwise route this as "species" (all tokens bird-y)
-    # and never see the location.
-    parsed = classify.parse_species_location(text)
-    if parsed:
-        species_code, species_name, loc_text = parsed
-        candidates = await asyncio.to_thread(ebird.geocode_candidates, loc_text)
-        if candidates:
-            non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])] or list(candidates)
-            if len(non_sg) == 1:
-                lat, lng, display_name = non_sg[0]
-                await _send_ebird_picker(
-                    event, lat, lng, display_name,
-                    species_code=species_code, species_name=species_name,
-                )
-            else:
-                await _send_geo_picker(event, non_sg[:5], species_code=species_code, species_name=species_name)
+    async with bot.action(event.chat_id, "typing"):
+        # "SPECIES near LOCATION" queries (e.g. "great horned owl near foster city")
+        # take the fast path straight to eBird's species-scoped endpoint. The
+        # classifier would otherwise route this as "species" (all tokens bird-y)
+        # and never see the location.
+        parsed = classify.parse_species_location(text)
+        if parsed:
+            species_code, species_name, loc_text = parsed
+            candidates = await asyncio.to_thread(ebird.geocode_candidates, loc_text)
+            if candidates:
+                non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])] or list(candidates)
+                if len(non_sg) == 1:
+                    lat, lng, display_name = non_sg[0]
+                    await _send_ebird_picker(
+                        event, lat, lng, display_name,
+                        species_code=species_code, species_name=species_name,
+                    )
+                else:
+                    await _send_geo_picker(event, non_sg[:5], species_code=species_code, species_name=species_name)
+                return
+            # Geocoder came up empty — fall through to the normal classifier path.
+
+        kind = classify.classify(text)
+
+        # Species query → local SG archive only. Exotic species (e.g. Sabah
+        # Partridge, Bornean Ground Cuckoo) correctly return "no results"
+        # instead of routing to a nonsense eBird location.
+        if kind == "species":
+            await _search_local(event, text)
             return
-        # Geocoder came up empty — fall through to the normal classifier path.
 
-    kind = classify.classify(text)
+        # Ambiguous query (place-with-bird-word like "hawk mountain",
+        # "eagle lake", "chinese garden") → try local archive first; if
+        # there's nothing, fall through to the geocoder.
+        if kind == "ambiguous":
+            rows = db.search(text, limit=100, acronym_map=ACRONYM_MAP)
+            if rows:
+                await _reply_local_rows(event, text, rows)
+                return
+            # fall through to geocoder
 
-    # Species query → local SG archive only. Exotic species (e.g. Sabah
-    # Partridge, Bornean Ground Cuckoo) correctly return "no results"
-    # instead of routing to a nonsense eBird location.
-    if kind == "species":
-        await _search_local(event, text)
-        return
-
-    # Ambiguous query (place-with-bird-word like "hawk mountain",
-    # "eagle lake", "chinese garden") → try local archive first; if
-    # there's nothing, fall through to the geocoder.
-    if kind == "ambiguous":
-        rows = db.search(text, limit=100, acronym_map=ACRONYM_MAP)
-        if rows:
-            await _reply_local_rows(event, text, rows)
+        # Location query (or ambiguous with no local hits).
+        candidates = await asyncio.to_thread(ebird.geocode_candidates, text)
+        if not candidates:
+            # Geocoder came up empty — nothing to route to. Fall back to
+            # local DB search so the user at least sees a consistent
+            # "No sightings found" reply in the same format as everything else.
+            await _search_local(event, text)
             return
-        # fall through to geocoder
 
-    # Location query (or ambiguous with no local hits).
-    candidates = await asyncio.to_thread(ebird.geocode_candidates, text)
-    if not candidates:
-        # Geocoder came up empty — nothing to route to. Fall back to
-        # local DB search so the user at least sees a consistent
-        # "No sightings found" reply in the same format as everything else.
-        await _search_local(event, text)
-        return
+        top_in_sg = ebird.is_in_sg(candidates[0][0], candidates[0][1])
+        if top_in_sg:
+            # The user named a place inside SG (e.g. "Windsor Park",
+            # "Pulau Ubin") — the local archive has better data for those
+            # than eBird's regional feed, so search it.
+            await _search_local(event, text)
+            return
 
-    top_in_sg = ebird.is_in_sg(candidates[0][0], candidates[0][1])
-    if top_in_sg:
-        # The user named a place inside SG (e.g. "Windsor Park",
-        # "Pulau Ubin") — the local archive has better data for those
-        # than eBird's regional feed, so search it.
-        await _search_local(event, text)
-        return
-
-    non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])]
-    if len(non_sg) == 1:
-        lat, lng, display_name = non_sg[0]
-        await _send_ebird_picker(event, lat, lng, display_name)
-    else:
-        await _send_geo_picker(event, non_sg[:5])
+        non_sg = [c for c in candidates if not ebird.is_in_sg(c[0], c[1])]
+        if len(non_sg) == 1:
+            lat, lng, display_name = non_sg[0]
+            await _send_ebird_picker(event, lat, lng, display_name)
+        else:
+            await _send_geo_picker(event, non_sg[:5])
 
 
 async def _search_local(event, text):
@@ -740,7 +716,8 @@ async def _search_local(event, text):
 
 
 async def _reply_local_rows(event, text, rows):
-    rows = maybe_dedupe_by_species(rows)
+    if len({r["species"] for r in rows}) > 5:
+        rows = ebird.group_by_species(rows)
     messages = build_chat_messages(text, rows, visible=5)
     await _reply_messages(event, messages)
 
@@ -825,11 +802,12 @@ async def on_refine(event):
         dist_km = stashed["pending_dist"]
         back_days = stashed["pending_days"]
         await event.answer(f"Searching {dist_km} km · {back_days} d…")
-        await _handle_ebird_at(
-            event, lat, lng, place_label, dist_km=dist_km, back_days=back_days,
-            species_code=stashed.get("species_code"),
-            species_name=stashed.get("species_name"),
-        )
+        async with bot.action(event.chat_id, "typing"):
+            await _handle_ebird_at(
+                event, lat, lng, place_label, dist_km=dist_km, back_days=back_days,
+                species_code=stashed.get("species_code"),
+                species_name=stashed.get("species_name"),
+            )
         return
 
     await event.answer("Unknown refine type.", alert=True)
